@@ -6,6 +6,7 @@ const cron = require('node-cron');
 const { exec } = require('child_process');
 const { promisify } = require('util');
 const dns = require('dns').promises;
+const ConnectionsDatabase = require('./database');
 
 const app = express();
 const PORT = 3001; // Safe port away from UniFi
@@ -20,7 +21,15 @@ app.use(express.static(path.join(__dirname, 'public')));
 const CONFIG = {
     dataDir: path.join(__dirname, '..', 'data'),
     collectorScript: path.join(__dirname, '..', 'collect_wan_connections.sh'),
-    geoServiceUrl: 'http://ip-api.com/json/' // Free IP geolocation service
+    geoServiceUrl: 'http://ip-api.com/json/', // Free IP geolocation service
+    wanHostname: 'mrfish.ooguy.com', // Our WAN interface hostname
+    homeLocation: {
+        latitude: 41.8781,  // Chicago coordinates
+        longitude: -87.6298,
+        city: 'Chicago',
+        region: 'Illinois',
+        country: 'United States'
+    }
 };
 
 // In-memory cache for processed data
@@ -30,10 +39,80 @@ let lastUpdate = new Date();
 // Hostname resolution cache
 const hostnameCache = new Map();
 
+// Cache for WAN IP resolution
+let wanIPCache = null;
+let wanIPCacheTime = 0;
+const WAN_IP_CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+
+// Persistent geolocation cache
+const GEOLOCATION_CACHE_FILE = path.join(CONFIG.dataDir, 'geolocation_cache.json');
+let geolocationCache = new Map();
+
+// Database instance with retention policies
+const db = new ConnectionsDatabase('../data/connections.db', {
+    maxSizeMB: 500,        // 500MB max database size
+    maxAgeDays: 30,        // 30 days retention
+    cleanupBatchSize: 5000, // Delete 5000 records per cleanup batch
+    enableSizeLimit: true,
+    enableTimeLimit: true
+});
+
 // Logging function
 const log = (message) => {
     console.log(`[${new Date().toISOString()}] ${message}`);
 };
+
+// Load geolocation cache from disk
+async function loadGeolocationCache() {
+    try {
+        const cacheData = await fs.readFile(GEOLOCATION_CACHE_FILE, 'utf8');
+        const parsedData = JSON.parse(cacheData);
+        
+        // Convert array back to Map
+        geolocationCache = new Map(parsedData);
+        log(`Loaded ${geolocationCache.size} cached geolocation entries`);
+    } catch (error) {
+        if (error.code !== 'ENOENT') {
+            log(`Error loading geolocation cache: ${error.message}`);
+        }
+        // If file doesn't exist or is invalid, start with empty cache
+        geolocationCache = new Map();
+    }
+}
+
+// Save geolocation cache to disk
+async function saveGeolocationCache() {
+    try {
+        // Convert Map to array for JSON serialization
+        const cacheArray = Array.from(geolocationCache.entries());
+        await fs.writeFile(GEOLOCATION_CACHE_FILE, JSON.stringify(cacheArray, null, 2));
+        log(`Saved ${geolocationCache.size} geolocation entries to cache`);
+    } catch (error) {
+        log(`Error saving geolocation cache: ${error.message}`);
+    }
+}
+
+// Get current WAN IP by resolving mrfish.ooguy.com
+async function getWanIP() {
+    const now = Date.now();
+    
+    // Return cached IP if still valid
+    if (wanIPCache && (now - wanIPCacheTime) < WAN_IP_CACHE_DURATION) {
+        return wanIPCache;
+    }
+    
+    try {
+        const addresses = await dns.lookup(CONFIG.wanHostname, { family: 4 });
+        wanIPCache = addresses.address;
+        wanIPCacheTime = now;
+        log(`Resolved WAN IP: ${wanIPCache}`);
+        return wanIPCache;
+    } catch (error) {
+        log(`Error resolving WAN hostname ${CONFIG.wanHostname}: ${error.message}`);
+        // Return cached value if available, otherwise null
+        return wanIPCache;
+    }
+}
 
 // Server-side hostname resolution
 async function resolveHostname(ip) {
@@ -59,12 +138,19 @@ async function resolveHostname(ip) {
 
 // Get external IP geolocation using free service
 async function getIPLocation(ip) {
+    // Check cache first
+    if (geolocationCache.has(ip)) {
+        const cachedData = geolocationCache.get(ip);
+        log(`Using cached geolocation for ${ip}`);
+        return cachedData;
+    }
+    
     try {
         const axios = require('axios');
         const response = await axios.get(`${CONFIG.geoServiceUrl}${ip}?fields=status,country,countryCode,region,regionName,city,lat,lon,timezone,isp,org,as,query`);
         
         if (response.data.status === 'success') {
-            return {
+            const locationData = {
                 ip: ip,
                 country: response.data.country,
                 countryCode: response.data.countryCode,
@@ -75,19 +161,43 @@ async function getIPLocation(ip) {
                 timezone: response.data.timezone,
                 isp: response.data.isp,
                 org: response.data.org,
-                asn: response.data.as
+                asn: response.data.as,
+                cachedAt: new Date().toISOString()
             };
+            
+            // Cache the result
+            geolocationCache.set(ip, locationData);
+            log(`Cached geolocation for ${ip}: ${locationData.city}, ${locationData.region}, ${locationData.country}`);
+            
+            // Save cache to disk periodically (every 10 entries)
+            if (geolocationCache.size % 10 === 0) {
+                saveGeolocationCache();
+            }
+            
+            return locationData;
         }
     } catch (error) {
         log(`Error getting location for IP ${ip}: ${error.message}`);
+        
+        // Cache failures to avoid repeated API calls for problematic IPs
+        const failureData = {
+            ip: ip,
+            error: 'Location lookup failed',
+            cachedAt: new Date().toISOString()
+        };
+        geolocationCache.set(ip, failureData);
     }
     
     return null;
 }
 
 // Filter for truly external IPs
-function isExternalIP(ip) {
+async function isExternalIP(ip) {
     if (!ip || !ip.match(/^\d+\.\d+\.\d+\.\d+$/)) return false;
+    
+    // Filter out our own WAN IP (dynamically resolved)
+    const wanIP = await getWanIP();
+    if (wanIP && ip === wanIP) return false;
     
     // Private IP ranges
     if (ip.startsWith('192.168.') || ip.startsWith('10.')) return false;
@@ -102,21 +212,25 @@ function isExternalIP(ip) {
 }
 
 // Extract IPs from different data source types
-function extractIPsFromData(data, dataType) {
+async function extractIPsFromData(data, dataType) {
     const ips = [];
     
     if (!Array.isArray(data)) return ips;
     
-    data.forEach(item => {
+    // Get WAN IP once for this extraction session
+    const wanIP = await getWanIP();
+    
+    for (const item of data) {
         try {
             switch (dataType) {
                 case 'connections':
-                    if (item.external_ip) {
+                    if (item.external_ip && await isExternalIP(item.external_ip)) {
                         ips.push({
                             ip: item.external_ip,
                             timestamp: item.timestamp,
                             type: 'firemain_log',
-                            details: `Connection from ${item.internal_ip}`
+                            details: `Connection from ${item.internal_ip}`,
+                            direction: 'inbound'
                         });
                     }
                     break;
@@ -126,18 +240,19 @@ function extractIPsFromData(data, dataType) {
                     let actualExternalIP = null;
                     if (item.local_ip && item.external_ip) {
                         // If external_ip is our WAN IP, then local_ip is actually the external one
-                        if (item.external_ip === '104.0.40.169') {
+                        if (item.external_ip === wanIP) {
                             actualExternalIP = item.local_ip;
                         } else {
                             actualExternalIP = item.external_ip;
                         }
                         
-                        if (actualExternalIP && isExternalIP(actualExternalIP)) {
+                        if (actualExternalIP && await isExternalIP(actualExternalIP)) {
                             ips.push({
                                 ip: actualExternalIP,
                                 timestamp: item.timestamp,
                                 type: 'active_connection',
-                                details: `${item.state} connection on port ${item.local_port || item.external_port}`
+                                details: `${item.state} connection on port ${item.local_port || item.external_port}`,
+                                direction: 'inbound'
                             });
                         }
                     }
@@ -148,16 +263,17 @@ function extractIPsFromData(data, dataType) {
                     const logEntry = item.log_entry || '';
                     const ipMatches = logEntry.match(/\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/g);
                     if (ipMatches) {
-                        ipMatches.forEach(ip => {
-                            if (isExternalIP(ip)) {
+                        for (const ip of ipMatches) {
+                            if (await isExternalIP(ip)) {
                                 ips.push({
                                     ip: ip,
                                     timestamp: item.timestamp,
                                     type: item.type || 'scan_probe',
-                                    details: logEntry.substring(0, 100)
+                                    details: logEntry.substring(0, 100),
+                                    direction: 'inbound'
                                 });
                             }
-                        });
+                        }
                     }
                     break;
                 
@@ -166,27 +282,57 @@ function extractIPsFromData(data, dataType) {
                     const data_entry = item.data || '';
                     const realtimeIPs = data_entry.match(/\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/g);
                     if (realtimeIPs) {
-                        realtimeIPs.forEach(ip => {
-                            if (isExternalIP(ip)) {
+                        for (const ip of realtimeIPs) {
+                            if (await isExternalIP(ip)) {
                                 ips.push({
                                     ip: ip,
                                     timestamp: item.timestamp,
                                     type: item.type || 'realtime',
-                                    details: data_entry.substring(0, 100)
+                                    details: data_entry.substring(0, 100),
+                                    direction: 'inbound'
                                 });
                             }
-                        });
+                        }
                     }
                     break;
                 
                 case 'vpn_connections':
                     // Extract IPs from VPN connection data
-                    if (item.external_ip && isExternalIP(item.external_ip)) {
+                    if (item.external_ip && await isExternalIP(item.external_ip)) {
                         ips.push({
                             ip: item.external_ip,
                             timestamp: item.timestamp,
                             type: item.type || 'vpn',
-                            details: `VPN endpoint on port ${item.external_port}`
+                            details: `VPN endpoint on port ${item.external_port}`,
+                            direction: 'outbound'
+                        });
+                    }
+                    break;
+                
+                case 'outbound_connections':
+                    // Extract IPs from outbound connection data
+                    if (item.external_ip && await isExternalIP(item.external_ip)) {
+                        ips.push({
+                            ip: item.external_ip,
+                            timestamp: item.timestamp,
+                            type: item.state || 'outbound_connection',
+                            details: `Outbound ${item.state} connection from ${item.local_ip}:${item.local_port} to port ${item.external_port}`,
+                            direction: 'outbound'
+                        });
+                    }
+                    break;
+                
+                case 'connection_tracking':
+                    // Extract IPs from connection tracking data (most comprehensive)
+                    if (item.external_ip && await isExternalIP(item.external_ip)) {
+                        const bytes_total = (item.orig_bytes || 0) + (item.reply_bytes || 0);
+                        const packets_total = (item.orig_packets || 0) + (item.reply_packets || 0);
+                        ips.push({
+                            ip: item.external_ip,
+                            timestamp: item.timestamp,
+                            type: item.state || 'connection_tracking',
+                            details: `${item.direction} ${item.state} connection via ${item.internal_ip}:${item.internal_port} ↔ ${item.external_ip}:${item.external_port} (${bytes_total} bytes, ${packets_total} packets)`,
+                            direction: item.direction
                         });
                     }
                     break;
@@ -195,7 +341,7 @@ function extractIPsFromData(data, dataType) {
             // Skip malformed entries
             log(`Error processing ${dataType} entry: ${error.message}`);
         }
-    });
+    }
     
     return ips;
 }
@@ -220,7 +366,9 @@ async function loadConnectionData() {
             'current_connections_': [],
             'scans_probes_': [],
             'realtime_connections_': [],
-            'vpn_connections_': []
+            'vpn_connections_': [],
+            'outbound_connections_': [],
+            'connection_tracking_': []
         };
         
         jsonFiles.forEach(file => {
@@ -234,23 +382,44 @@ async function loadConnectionData() {
         // Collect all IPs from all sources
         const allConnectionData = [];
         
+        // Process all files to get complete historical data
         for (const [prefix, files] of Object.entries(fileTypes)) {
             if (files.length > 0) {
-                const latestFile = files.sort().pop(); // Get most recent
-                const filePath = path.join(CONFIG.dataDir, latestFile);
                 const dataType = prefix.replace(/_$/, ''); // Remove only trailing underscore
+                log(`Loading ${dataType} from ${files.length} files...`);
                 
-                try {
-                    log(`Loading ${dataType} from: ${latestFile}`);
-                    const data = await fs.readFile(filePath, 'utf8');
-                    const parsedData = JSON.parse(data);
-                    // log(`Debug: Processing dataType '${dataType}' with ${parsedData.length} records`);
-                    const extractedIPs = extractIPsFromData(parsedData, dataType);
-                    allConnectionData.push(...extractedIPs);
-                    log(`Extracted ${extractedIPs.length} IPs from ${dataType}`);
-                } catch (error) {
-                    log(`Error reading ${dataType} file ${latestFile}: ${error.message}`);
+                // Sort files by timestamp (newest first) and process all
+                const sortedFiles = files.sort().reverse();
+                
+                for (const file of sortedFiles) {
+                    const filePath = path.join(CONFIG.dataDir, file);
+                    
+                    try {
+                        const data = await fs.readFile(filePath, 'utf8');
+                        const parsedData = JSON.parse(data);
+                        const extractedIPs = await extractIPsFromData(parsedData, dataType);
+                        allConnectionData.push(...extractedIPs);
+                        
+                        // Limit processing to avoid memory issues (keep last 24 hours worth)
+                        const fileTimestamp = file.match(/(\d{8}_\d{6})/);
+                        if (fileTimestamp) {
+                            const fileDate = new Date(
+                                fileTimestamp[1].replace(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/, 
+                                '$1-$2-$3T$4:$5:$6')
+                            );
+                            const hoursSinceFile = (Date.now() - fileDate.getTime()) / (1000 * 60 * 60);
+                            
+                            // Stop processing files older than 24 hours for performance
+                            if (hoursSinceFile > 24) {
+                                break;
+                            }
+                        }
+                    } catch (error) {
+                        log(`Error reading ${dataType} file ${file}: ${error.message}`);
+                    }
                 }
+                
+                log(`Total extracted ${allConnectionData.length} connection records from ${dataType}`);
             }
         }
         
@@ -282,12 +451,20 @@ async function loadConnectionData() {
                 // Resolve hostname for this IP
                 const hostname = await resolveHostname(ip);
                 
+                // Calculate direction counts
+                const directions = ipConnections.map(c => c.direction || 'inbound');
+                const inboundCount = directions.filter(d => d === 'inbound').length;
+                const outboundCount = directions.filter(d => d === 'outbound').length;
+                
                 processedConnections.push({
                     ...location,
                     hostname: hostname,
                     connectionCount,
+                    inboundCount,
+                    outboundCount,
                     lastSeen: lastSeen ? lastSeen.toISOString() : new Date().toISOString(),
                     connectionTypes: [...new Set(ipConnections.map(c => c.type))],
+                    directions: [...new Set(directions)],
                     details: ipConnections.slice(0, 3).map(c => c.details) // Keep some sample details
                 });
             }
@@ -300,7 +477,11 @@ async function loadConnectionData() {
         
         connectionsCache = processedConnections;
         lastUpdate = new Date();
-        log(`Processed ${processedConnections.length} IP locations with hostnames`);
+        
+        // Store raw connection data for historical analysis
+        global.rawConnectionData = allConnectionData;
+        
+        log(`Processed ${processedConnections.length} IP locations with ${allConnectionData.length} total connection records`);
         
         return processedConnections;
         
@@ -342,11 +523,61 @@ app.get('/api/connections', async (req, res) => {
         res.json({
             connections: connectionsCache,
             lastUpdate: lastUpdate,
-            totalConnections: connectionsCache.length
+            totalConnections: connectionsCache.length,
+            homeLocation: CONFIG.homeLocation
         });
     } catch (error) {
         log(`Error serving connections: ${error.message}`);
         res.status(500).json({ error: 'Failed to load connection data' });
+    }
+});
+
+// API endpoint for historical connection data with filtering
+app.get('/api/connections/history', async (req, res) => {
+    try {
+        const { startDate, endDate, direction, limit = 1000 } = req.query;
+        
+        if (!global.rawConnectionData) {
+            await loadConnectionData();
+        }
+        
+        let filteredConnections = [...(global.rawConnectionData || [])];
+        
+        // Apply date filtering
+        if (startDate) {
+            const start = new Date(startDate);
+            filteredConnections = filteredConnections.filter(conn => 
+                new Date(conn.timestamp) >= start
+            );
+        }
+        
+        if (endDate) {
+            const end = new Date(endDate);
+            filteredConnections = filteredConnections.filter(conn => 
+                new Date(conn.timestamp) <= end
+            );
+        }
+        
+        // Apply direction filtering
+        if (direction && direction !== 'both') {
+            filteredConnections = filteredConnections.filter(conn => 
+                conn.direction === direction
+            );
+        }
+        
+        // Sort by timestamp (newest first) and limit results
+        filteredConnections.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        filteredConnections = filteredConnections.slice(0, parseInt(limit));
+        
+        res.json({
+            connections: filteredConnections,
+            totalCount: filteredConnections.length,
+            filters: { startDate, endDate, direction, limit }
+        });
+        
+    } catch (error) {
+        log(`Error serving historical connections: ${error.message}`);
+        res.status(500).json({ error: 'Failed to load historical connection data' });
     }
 });
 
@@ -380,6 +611,55 @@ app.get('/api/hostname/:ip', async (req, res) => {
     }
 });
 
+// API endpoint to get location information for an IP address
+app.get('/api/location/:ip', async (req, res) => {
+    try {
+        const ip = req.params.ip;
+        if (!ip.match(/^\d+\.\d+\.\d+\.\d+$/)) {
+            return res.status(400).json({ error: 'Invalid IP address format' });
+        }
+        
+        const locationData = await getIPLocation(ip);
+        if (locationData) {
+            res.json(locationData);
+        } else {
+            res.status(404).json({ error: 'Location data not found' });
+        }
+    } catch (error) {
+        log(`Error getting location for ${req.params.ip}: ${error.message}`);
+        res.status(500).json({ error: 'Location lookup failed' });
+    }
+});
+
+// API endpoint for fast database-backed historical connections
+app.get('/api/connections/history-fast', async (req, res) => {
+    try {
+        const { startDate, endDate, direction, limit = 1000 } = req.query;
+        
+        const filters = {
+            startDate: startDate ? new Date(startDate).toISOString() : null,
+            endDate: endDate ? new Date(endDate).toISOString() : null,
+            direction: direction && direction !== 'both' ? direction : null,
+            limit: parseInt(limit)
+        };
+        
+        const connections = await db.getAggregatedConnections(filters);
+        
+        res.json({
+            connections: connections,
+            totalConnections: connections.length,
+            lastUpdate: new Date().toISOString(),
+            homeLocation: CONFIG.homeLocation,
+            source: 'database',
+            filters: filters
+        });
+        
+    } catch (error) {
+        log(`Error serving fast historical connections: ${error.message}`);
+        res.status(500).json({ error: 'Failed to load historical connection data from database' });
+    }
+});
+
 app.get('/api/status', (req, res) => {
     res.json({
         status: 'running',
@@ -388,6 +668,74 @@ app.get('/api/status', (req, res) => {
         uptime: process.uptime(),
         port: PORT
     });
+});
+
+// API endpoint for database statistics
+app.get('/api/stats', async (req, res) => {
+    try {
+        const stats = await db.getStats();
+        const dbSizeMB = await db.getDatabaseSizeMB();
+        
+        res.json({
+            database: {
+                ...stats,
+                size_mb: dbSizeMB
+            },
+            cache: {
+                connections: connectionsCache.length,
+                geolocations: geolocationCache.size
+            },
+            system: {
+                uptime: process.uptime(),
+                memory: process.memoryUsage(),
+                lastUpdate: lastUpdate
+            }
+        });
+    } catch (error) {
+        log(`Error getting database stats: ${error.message}`);
+        res.status(500).json({ error: 'Failed to get database statistics', details: error.message });
+    }
+});
+
+// API endpoint to manually run retention policies
+app.post('/api/retention/run', async (req, res) => {
+    try {
+        log('Manual retention policy run requested via API');
+        const results = await db.runRetentionPolicies();
+        res.json({
+            success: true,
+            results: results,
+            message: `Cleaned up ${results.aged + results.sized + results.geolocations} total records`
+        });
+    } catch (error) {
+        log(`Error running manual retention policies: ${error.message}`);
+        res.status(500).json({ error: 'Failed to run retention policies', details: error.message });
+    }
+});
+
+// API endpoint to get retention policy configuration
+app.get('/api/retention/config', (req, res) => {
+    res.json({
+        config: db.retentionConfig,
+        currentSizeMB: null // Will be populated if database is initialized
+    });
+});
+
+// API endpoint to update retention policy configuration
+app.put('/api/retention/config', (req, res) => {
+    try {
+        const { maxSizeMB, maxAgeDays, enableSizeLimit, enableTimeLimit } = req.body;
+        
+        if (maxSizeMB && maxSizeMB > 0) db.retentionConfig.maxSizeMB = maxSizeMB;
+        if (maxAgeDays && maxAgeDays > 0) db.retentionConfig.maxAgeDays = maxAgeDays;
+        if (enableSizeLimit !== undefined) db.retentionConfig.enableSizeLimit = enableSizeLimit;
+        if (enableTimeLimit !== undefined) db.retentionConfig.enableTimeLimit = enableTimeLimit;
+        
+        log(`Retention config updated: ${JSON.stringify(db.retentionConfig)}`);
+        res.json({ success: true, config: db.retentionConfig });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to update retention config', details: error.message });
+    }
 });
 
 // Serve main page
@@ -406,9 +754,61 @@ loadConnectionData().then(() => {
     log('Initial data load completed');
 });
 
-// Start server
-app.listen(PORT, '0.0.0.0', () => {
-    log(`Firewalla IP Monitor server running on http://0.0.0.0:${PORT}`);
-    log(`Access via: http://unifi.mf:${PORT} or http://192.168.86.1:${PORT}`);
-    log('Scheduled comprehensive data collection every 2 minutes');
+// Initialize server
+async function initializeServer() {
+    // Initialize database
+    try {
+        await db.init();
+        log('Database initialized successfully');
+    } catch (error) {
+        log(`Warning: Database initialization failed: ${error.message}`);
+        log('Historical data will fall back to JSON files');
+    }
+    
+    // Load geolocation cache
+    await loadGeolocationCache();
+    
+    // Schedule periodic cache saves (every 5 minutes)
+    cron.schedule('*/5 * * * *', () => {
+        saveGeolocationCache();
+    });
+    
+    // Schedule database retention policies (daily at 2 AM)
+    cron.schedule('0 2 * * *', async () => {
+        try {
+            log('Running daily database retention policies...');
+            const results = await db.runRetentionPolicies();
+            log(`Retention completed: ${results.aged} aged, ${results.sized} oversized, ${results.geolocations} orphaned geo records removed`);
+        } catch (error) {
+            log(`Error running retention policies: ${error.message}`);
+        }
+    });
+    
+    // Start server
+    app.listen(PORT, '0.0.0.0', () => {
+        log(`Firewalla IP Monitor server running on http://0.0.0.0:${PORT}`);
+        log(`Access via: http://localhost:${PORT} or http://[your-ip]:${PORT}`);
+        log('Scheduled comprehensive data collection every 2 minutes');
+        log('Scheduled geolocation cache saves every 5 minutes');
+        log(`Scheduled database retention policies daily at 2 AM (${db.retentionConfig.maxAgeDays}d/${db.retentionConfig.maxSizeMB}MB limits)`);
+    });
+}
+
+// Handle graceful shutdown
+process.on('SIGINT', async () => {
+    log('Shutting down server...');
+    await saveGeolocationCache();
+    process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+    log('Shutting down server...');
+    await saveGeolocationCache();
+    process.exit(0);
+});
+
+// Start the server
+initializeServer().catch(error => {
+    log(`Error initializing server: ${error.message}`);
+    process.exit(1);
 });

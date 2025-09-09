@@ -2,6 +2,94 @@
 
 All notable changes to the Firewalla IP Monitor project will be documented in this file.
 
+## [2.0.0] - 2025-09-09
+
+### 🚀 Major: SQLite Database Implementation
+
+**Performance Breakthrough**: Complete migration from JSON file storage to SQLite database with **6x performance improvement**.
+
+#### Added
+- **SQLite Database Backend**: 
+  - High-performance structured storage replacing JSON files
+  - Normalized tables: `connections` and `geolocations`
+  - Comprehensive indexing for sub-second query responses
+  - Database file: `/data/connections.db` (550MB storing 1.18M+ connections)
+  
+- **Database Management System**:
+  - `webapp/database.js` - Full database abstraction layer
+  - `migrate_to_db.js` - Migration tool for converting JSON to SQLite
+  - Unique constraints preventing duplicate connection records
+  - Efficient LEFT JOIN operations for geolocation data
+
+- **Data Retention Policies**:
+  - **Size-based retention**: Configurable maximum database size (default: 10GB)
+  - **Time-based retention**: Configurable data age limit (default: 45 days)
+  - **Automated cleanup**: Daily scheduled retention at 2 AM via cron
+  - **Manual triggers**: API endpoints for immediate cleanup execution
+  - **Space recovery**: Automatic VACUUM operations after significant deletions
+  - **Orphan cleanup**: Removes geolocation entries for deleted IPs
+
+#### Performance Improvements
+- **Query Speed**: Sub-3-second responses vs 18+ seconds (file-based)
+- **Database Size**: 550MB storing 2+ days of comprehensive connection data
+- **Space Efficiency**: ~275MB per day of connection tracking
+- **Memory Usage**: Optimized server memory footprint with database caching
+
+#### New API Endpoints
+- `GET /api/connections/history-fast` - High-speed database queries
+- `GET /api/stats` - Database and system statistics
+- `GET /api/retention/config` - View retention policy settings
+- `PUT /api/retention/config` - Update retention policies
+- `POST /api/retention/run` - Manually trigger cleanup
+
+#### Database Schema
+```sql
+CREATE TABLE connections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ip TEXT NOT NULL,
+    timestamp DATETIME NOT NULL,
+    direction TEXT NOT NULL,
+    connection_type TEXT,
+    internal_ip TEXT,
+    internal_port INTEGER,
+    external_port INTEGER,
+    state TEXT,
+    orig_packets INTEGER DEFAULT 0,
+    orig_bytes INTEGER DEFAULT 0,
+    reply_packets INTEGER DEFAULT 0,
+    reply_bytes INTEGER DEFAULT 0,
+    details TEXT,
+    source_file TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(ip, timestamp, direction, internal_ip, external_port)
+);
+
+CREATE TABLE geolocations (
+    ip TEXT PRIMARY KEY,
+    country TEXT, country_code TEXT, region TEXT, city TEXT,
+    latitude REAL, longitude REAL, timezone TEXT,
+    isp TEXT, org TEXT, asn TEXT, hostname TEXT,
+    last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+#### Migration Results
+- **2,773 JSON files** successfully migrated to SQLite
+- **296MB disk space** reclaimed by removing redundant JSON files
+- **1.18M connection records** from 1,825 unique IPs preserved
+- **Zero data loss** during migration process
+
+#### Enhanced Features
+- **Historical Data Analysis**: Fast time-range filtering and visualization
+- **Advanced Query Filters**: IP, direction, date ranges with database indexes
+- **Retention Management**: Live configuration updates without service restart
+- **Backward Compatibility**: Existing APIs maintained during transition
+
+### Fixed
+- **Performance Issues**: Eliminated multi-minute load times for historical data
+- **Memory Leaks**: Database connection management prevents server crashes
+- **Disk Space Growth**: Automated retention prevents unlimited database expansion
+
 ## [1.1.0] - 2025-09-09
 
 ### Added

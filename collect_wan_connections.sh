@@ -5,13 +5,13 @@
 
 set -euo pipefail
 
-# Configuration
-FIREWALLA_HOST="192.168.86.1"
-FIREWALLA_USER="pi"
-DATA_DIR="/home/kdesch/scripts/firewalla-ip-monitor/data"
-LOG_FILE="/home/kdesch/scripts/firewalla-ip-monitor/monitor.log"
-WAN_INTERFACE="eth0"
-WAN_IP="104.0.40.169"
+# Configuration - UPDATE THESE VALUES FOR YOUR SETUP
+FIREWALLA_HOST="192.168.1.1"        # Your Firewalla IP address
+FIREWALLA_USER="pi"                  # SSH username (typically 'pi')
+DATA_DIR="$(dirname "$0")/data"      # Data directory (relative to script)
+LOG_FILE="$(dirname "$0")/monitor.log" # Log file location
+WAN_INTERFACE="eth0"                 # WAN interface name
+WAN_IP=""                           # Leave empty - will be auto-detected
 
 # Create data directory
 mkdir -p "${DATA_DIR}"
@@ -28,8 +28,9 @@ collect_firemain_ips() {
     
     log "Collecting external IPs from FireMain logs..."
     
-    # Get recent connection logs from Firewalla (increased from 1000 to 5000 lines to catch more history)
-    ssh "${FIREWALLA_USER}@${FIREWALLA_HOST}" "tail -n 5000 /home/pi/logs/FireMain2.log | grep 'BroDetect: Conn:Debug'" > "${temp_file}"
+    # Get recent connection logs from Firewalla (find most recent FireMain log)
+    # Use the most recent FireMain log file
+    ssh "${FIREWALLA_USER}@${FIREWALLA_HOST}" "ls -t /home/pi/logs/FireMain*.log | head -1 | xargs tail -n 5000" | grep 'BroDetect: Conn:Debug' > "${temp_file}"
     
     # Process logs to extract external IP data
     {
@@ -270,6 +271,150 @@ collect_vpn_connections() {
     log "VPN connections saved to: ${output_file}"
 }
 
+# Collect outbound connections (connections initiated FROM internal network TO external)
+collect_outbound_connections() {
+    local output_file="${DATA_DIR}/outbound_connections_$(date +%Y%m%d_%H%M%S).json"
+    
+    log "Collecting outbound connections..."
+    
+    {
+        echo "["
+        local first=true
+        
+        # Get outbound connections - connections where our internal IP initiated to external
+        ssh "${FIREWALLA_USER}@${FIREWALLA_HOST}" "netstat -tn | grep 'ESTABLISHED\|SYN_SENT\|FIN_WAIT'" | while read line; do
+            # Parse the netstat line: Proto Recv-Q Send-Q Local Address Foreign Address State
+            if [[ $line =~ ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)\ +([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)\ +(.*) ]]; then
+                local local_ip="${BASH_REMATCH[1]}"
+                local local_port="${BASH_REMATCH[2]}"
+                local remote_ip="${BASH_REMATCH[3]}"
+                local remote_port="${BASH_REMATCH[4]}"
+                local state="${BASH_REMATCH[5]}"
+                
+                # Check if this is outbound (local IP is internal, remote is external)
+                if [[ "$local_ip" =~ ^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.) ]] && 
+                   [[ ! "$remote_ip" =~ ^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.) ]]; then
+                    
+                    # Skip if remote IP is our WAN IP (not truly outbound)
+                    if [[ "$remote_ip" != "$WAN_IP" ]]; then
+                        if [[ "$first" == true ]]; then
+                            first=false
+                        else
+                            echo ","
+                        fi
+                        echo -n "    {\"timestamp\": \"$(date -Iseconds)\", \"local_ip\": \"$local_ip\", \"local_port\": \"$local_port\", \"external_ip\": \"$remote_ip\", \"external_port\": \"$remote_port\", \"state\": \"$state\", \"direction\": \"outbound\", \"collected_at\": \"$(date -Iseconds)\"}"
+                    fi
+                fi
+            fi
+        done
+        
+        # Also check for outbound UDP connections (like DNS, etc.)
+        ssh "${FIREWALLA_USER}@${FIREWALLA_HOST}" "ss -u -n | grep -E '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'" | while read line; do
+            if [[ $line =~ ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)\ +([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+) ]]; then
+                local local_ip="${BASH_REMATCH[1]}"
+                local local_port="${BASH_REMATCH[2]}"
+                local remote_ip="${BASH_REMATCH[3]}"
+                local remote_port="${BASH_REMATCH[4]}"
+                
+                # Check if this is outbound UDP
+                if [[ "$local_ip" =~ ^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.) ]] && 
+                   [[ ! "$remote_ip" =~ ^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.) ]] &&
+                   [[ "$remote_ip" != "$WAN_IP" ]]; then
+                    
+                    echo ","
+                    echo -n "    {\"timestamp\": \"$(date -Iseconds)\", \"local_ip\": \"$local_ip\", \"local_port\": \"$local_port\", \"external_ip\": \"$remote_ip\", \"external_port\": \"$remote_port\", \"state\": \"UDP\", \"direction\": \"outbound\", \"collected_at\": \"$(date -Iseconds)\"}"
+                fi
+            fi
+        done
+        
+        echo ""
+        echo "]"
+    } > "${output_file}"
+    
+    log "Outbound connections saved to: ${output_file}"
+}
+
+# Collect connection tracking table data (comprehensive NAT and connection info)
+collect_connection_tracking() {
+    local output_file="${DATA_DIR}/connection_tracking_$(date +%Y%m%d_%H%M%S).json"
+    
+    log "Collecting connection tracking data..."
+    
+    {
+        echo "["
+        local first=true
+        
+        # Get all active connections from the connection tracking table
+        ssh "${FIREWALLA_USER}@${FIREWALLA_HOST}" "sudo cat /proc/net/nf_conntrack" | while read line; do
+            # Parse conntrack format: ipv4 2 tcp 6 431999 ESTABLISHED src=A dst=B sport=X dport=Y packets=P bytes=B src=C dst=D sport=Z dport=W packets=Q bytes=R [ASSURED] mark=M zone=Z use=U
+            
+            if [[ $line =~ ipv4.*tcp.*src=([0-9.]+).*dst=([0-9.]+).*sport=([0-9]+).*dport=([0-9]+).*packets=([0-9]+).*bytes=([0-9]+).*src=([0-9.]+).*dst=([0-9.]+).*sport=([0-9]+).*dport=([0-9]+).*packets=([0-9]+).*bytes=([0-9]+) ]]; then
+                local orig_src="${BASH_REMATCH[1]}"
+                local orig_dst="${BASH_REMATCH[2]}"
+                local orig_sport="${BASH_REMATCH[3]}"
+                local orig_dport="${BASH_REMATCH[4]}"
+                local orig_packets="${BASH_REMATCH[5]}"
+                local orig_bytes="${BASH_REMATCH[6]}"
+                local reply_src="${BASH_REMATCH[7]}"
+                local reply_dst="${BASH_REMATCH[8]}"
+                local reply_sport="${BASH_REMATCH[9]}"
+                local reply_dport="${BASH_REMATCH[10]}"
+                local reply_packets="${BASH_REMATCH[11]}"
+                local reply_bytes="${BASH_REMATCH[12]}"
+                
+                # Extract connection state
+                local state=""
+                if [[ $line =~ (ESTABLISHED|SYN_SENT|SYN_RECV|FIN_WAIT|CLOSE_WAIT|LAST_ACK|TIME_WAIT|CLOSE|LISTEN) ]]; then
+                    state="${BASH_REMATCH[1]}"
+                fi
+                
+                # Determine if this is inbound or outbound based on source/destination
+                local direction=""
+                local external_ip=""
+                local internal_ip=""
+                local external_port=""
+                local internal_port=""
+                
+                # Check if original source is internal (outbound connection)
+                if [[ "$orig_src" =~ ^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.) ]]; then
+                    # Outbound connection: internal -> external
+                    if [[ ! "$orig_dst" =~ ^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.) ]] && [[ "$orig_dst" != "$WAN_IP" ]]; then
+                        direction="outbound"
+                        external_ip="$orig_dst"
+                        internal_ip="$orig_src"
+                        external_port="$orig_dport"
+                        internal_port="$orig_sport"
+                    fi
+                # Check if reply source is external (inbound connection)
+                elif [[ ! "$reply_src" =~ ^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.) ]] && [[ "$reply_src" != "$WAN_IP" ]]; then
+                    # Inbound connection: external -> internal (via NAT/port forwarding)
+                    direction="inbound"
+                    external_ip="$reply_src"
+                    internal_ip="$orig_dst"
+                    external_port="$reply_sport"
+                    internal_port="$orig_dport"
+                fi
+                
+                # Only include if we have a valid external connection
+                if [[ -n "$direction" && -n "$external_ip" ]]; then
+                    if [[ "$first" == true ]]; then
+                        first=false
+                    else
+                        echo ","
+                    fi
+                    
+                    echo -n "    {\"timestamp\": \"$(date -Iseconds)\", \"direction\": \"$direction\", \"external_ip\": \"$external_ip\", \"external_port\": \"$external_port\", \"internal_ip\": \"$internal_ip\", \"internal_port\": \"$internal_port\", \"state\": \"$state\", \"orig_packets\": $orig_packets, \"orig_bytes\": $orig_bytes, \"reply_packets\": $reply_packets, \"reply_bytes\": $reply_bytes, \"type\": \"connection_tracking\", \"collected_at\": \"$(date -Iseconds)\"}"
+                fi
+            fi
+        done
+        
+        echo ""
+        echo "]"
+    } > "${output_file}"
+    
+    log "Connection tracking data saved to: ${output_file}"
+}
+
 # Comprehensive collection function
 main() {
     log "Starting comprehensive WAN connection monitoring collection..."
@@ -294,6 +439,8 @@ collect_all() {
     collect_scan_detection
     collect_realtime_connections
     collect_vpn_connections
+    collect_outbound_connections
+    collect_connection_tracking
     
     log "Full collection completed - check data directory for all files"
 }
@@ -312,6 +459,12 @@ case "${1:-}" in
     "--realtime")
         collect_realtime_connections
         ;;
+    "--outbound")
+        collect_outbound_connections
+        ;;
+    "--conntrack")
+        collect_connection_tracking
+        ;;
     "--all")
         collect_all
         ;;
@@ -322,6 +475,8 @@ case "${1:-}" in
         echo "  --current     Collect current connections only"  
         echo "  --scans       Collect scan/probe detection only"
         echo "  --realtime    Collect real-time connection data only"
+        echo "  --outbound    Collect outbound connections only"
+        echo "  --conntrack   Collect connection tracking table data only"
         echo "  --all         Run ALL collection methods (comprehensive)"
         echo "  --help        Show this help"
         echo "  (no args)     Run standard comprehensive collection"

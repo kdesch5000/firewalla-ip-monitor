@@ -1,0 +1,551 @@
+const sqlite3 = require('sqlite3').verbose();
+const path = require('path');
+
+class ConnectionsDatabase {
+    constructor(dbPath = '../data/connections.db', options = {}) {
+        this.dbPath = path.resolve(__dirname, dbPath);
+        this.db = null;
+        this.isInitialized = false;
+        
+        // Retention policies configuration
+        this.retentionConfig = {
+            maxSizeMB: options.maxSizeMB || 1000, // Default 1GB max database size
+            maxAgeDays: options.maxAgeDays || 30, // Default 30 days retention
+            cleanupBatchSize: options.cleanupBatchSize || 10000, // Records to delete per batch
+            enableSizeLimit: options.enableSizeLimit !== false, // Enable by default
+            enableTimeLimit: options.enableTimeLimit !== false  // Enable by default
+        };
+    }
+
+    // Initialize database connection and create tables
+    async init() {
+        return new Promise((resolve, reject) => {
+            this.db = new sqlite3.Database(this.dbPath, (err) => {
+                if (err) {
+                    console.error('Error opening database:', err.message);
+                    reject(err);
+                } else {
+                    console.log(`Connected to SQLite database at ${this.dbPath}`);
+                    this.createTables().then(() => {
+                        this.isInitialized = true;
+                        resolve();
+                    }).catch(reject);
+                }
+            });
+        });
+    }
+
+    // Create database tables
+    async createTables() {
+        const createConnectionsTable = `
+            CREATE TABLE IF NOT EXISTS connections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip TEXT NOT NULL,
+                timestamp DATETIME NOT NULL,
+                direction TEXT NOT NULL,
+                connection_type TEXT,
+                internal_ip TEXT,
+                internal_port INTEGER,
+                external_port INTEGER,
+                state TEXT,
+                orig_packets INTEGER DEFAULT 0,
+                orig_bytes INTEGER DEFAULT 0,
+                reply_packets INTEGER DEFAULT 0,
+                reply_bytes INTEGER DEFAULT 0,
+                details TEXT,
+                source_file TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(ip, timestamp, direction, internal_ip, external_port)
+            )
+        `;
+
+        const createGeolocationsTable = `
+            CREATE TABLE IF NOT EXISTS geolocations (
+                ip TEXT PRIMARY KEY,
+                country TEXT,
+                country_code TEXT,
+                region TEXT,
+                city TEXT,
+                latitude REAL,
+                longitude REAL,
+                timezone TEXT,
+                isp TEXT,
+                org TEXT,
+                asn TEXT,
+                hostname TEXT,
+                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `;
+
+        const createIndexes = [
+            'CREATE INDEX IF NOT EXISTS idx_connections_ip ON connections(ip)',
+            'CREATE INDEX IF NOT EXISTS idx_connections_timestamp ON connections(timestamp)', 
+            'CREATE INDEX IF NOT EXISTS idx_connections_ip_timestamp ON connections(ip, timestamp)',
+            'CREATE INDEX IF NOT EXISTS idx_connections_direction ON connections(direction)',
+            'CREATE INDEX IF NOT EXISTS idx_connections_type ON connections(connection_type)'
+        ];
+
+        return new Promise((resolve, reject) => {
+            this.db.serialize(() => {
+                this.db.run(createConnectionsTable);
+                this.db.run(createGeolocationsTable);
+                
+                this.db.run('BEGIN');
+                
+                createIndexes.forEach(indexSQL => {
+                    this.db.run(indexSQL);
+                });
+                
+                this.db.run('COMMIT', (err) => {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        console.log('Database tables and indexes created successfully');
+                        resolve();
+                    }
+                });
+            });
+        });
+    }
+
+    // Insert connection record
+    async insertConnection(connectionData) {
+        const sql = `
+            INSERT OR IGNORE INTO connections 
+            (ip, timestamp, direction, connection_type, internal_ip, internal_port, 
+             external_port, state, orig_packets, orig_bytes, reply_packets, reply_bytes, details, source_file)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+
+        return new Promise((resolve, reject) => {
+            this.db.run(sql, [
+                connectionData.ip,
+                connectionData.timestamp,
+                connectionData.direction || 'unknown',
+                connectionData.type || connectionData.connection_type,
+                connectionData.internal_ip,
+                connectionData.internal_port,
+                connectionData.external_port,
+                connectionData.state,
+                connectionData.orig_packets || 0,
+                connectionData.orig_bytes || 0,
+                connectionData.reply_packets || 0,
+                connectionData.reply_bytes || 0,
+                connectionData.details || '',
+                connectionData.source_file || ''
+            ], function(err) {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(this.changes);
+                }
+            });
+        });
+    }
+
+    // Batch insert connections (much faster)
+    async insertConnectionsBatch(connections) {
+        return new Promise((resolve, reject) => {
+            const sql = `
+                INSERT OR IGNORE INTO connections 
+                (ip, timestamp, direction, connection_type, internal_ip, internal_port, 
+                 external_port, state, orig_packets, orig_bytes, reply_packets, reply_bytes, details, source_file)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `;
+
+            this.db.serialize(() => {
+                let insertCount = 0;
+                this.db.run('BEGIN TRANSACTION');
+                
+                const stmt = this.db.prepare(sql);
+                
+                connections.forEach(conn => {
+                    stmt.run([
+                        conn.ip,
+                        conn.timestamp,
+                        conn.direction || 'unknown',
+                        conn.type || conn.connection_type,
+                        conn.internal_ip,
+                        conn.internal_port,
+                        conn.external_port,
+                        conn.state,
+                        conn.orig_packets || 0,
+                        conn.orig_bytes || 0,
+                        conn.reply_packets || 0,
+                        conn.reply_bytes || 0,
+                        conn.details || '',
+                        conn.source_file || ''
+                    ], function(err) {
+                        if (!err && this.changes > 0) {
+                            insertCount++;
+                        }
+                    });
+                });
+                
+                stmt.finalize();
+                this.db.run('COMMIT', (err) => {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        console.log(`Batch inserted ${insertCount} connection records`);
+                        resolve(insertCount);
+                    }
+                });
+            });
+        });
+    }
+
+    // Get historical connections with filtering
+    async getHistoricalConnections(filters = {}) {
+        let sql = `
+            SELECT c.*, g.country, g.country_code, g.region, g.city, g.latitude, g.longitude,
+                   g.timezone, g.isp, g.org, g.asn, g.hostname
+            FROM connections c
+            LEFT JOIN geolocations g ON c.ip = g.ip
+            WHERE 1=1
+        `;
+        
+        const params = [];
+        
+        if (filters.startDate) {
+            sql += ' AND c.timestamp >= ?';
+            params.push(filters.startDate);
+        }
+        
+        if (filters.endDate) {
+            sql += ' AND c.timestamp <= ?';
+            params.push(filters.endDate);
+        }
+        
+        if (filters.direction && filters.direction !== 'both') {
+            sql += ' AND c.direction = ?';
+            params.push(filters.direction);
+        }
+        
+        if (filters.ip) {
+            sql += ' AND c.ip = ?';
+            params.push(filters.ip);
+        }
+        
+        sql += ' ORDER BY c.timestamp DESC';
+        
+        if (filters.limit) {
+            sql += ' LIMIT ?';
+            params.push(parseInt(filters.limit));
+        }
+
+        return new Promise((resolve, reject) => {
+            this.db.all(sql, params, (err, rows) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(rows);
+                }
+            });
+        });
+    }
+
+    // Get aggregated connection data (for current API compatibility)
+    async getAggregatedConnections(filters = {}) {
+        let sql = `
+            SELECT c.ip,
+                   COUNT(*) as connection_count,
+                   SUM(CASE WHEN c.direction = 'inbound' THEN 1 ELSE 0 END) as inbound_count,
+                   SUM(CASE WHEN c.direction = 'outbound' THEN 1 ELSE 0 END) as outbound_count,
+                   MAX(c.timestamp) as last_seen,
+                   GROUP_CONCAT(DISTINCT c.connection_type) as connection_types,
+                   GROUP_CONCAT(DISTINCT c.direction) as directions,
+                   g.country, g.country_code, g.region, g.city, g.latitude, g.longitude,
+                   g.timezone, g.isp, g.org, g.asn, g.hostname
+            FROM connections c
+            LEFT JOIN geolocations g ON c.ip = g.ip
+            WHERE 1=1
+        `;
+        
+        const params = [];
+        
+        if (filters.startDate) {
+            sql += ' AND c.timestamp >= ?';
+            params.push(filters.startDate);
+        }
+        
+        if (filters.endDate) {
+            sql += ' AND c.timestamp <= ?';
+            params.push(filters.endDate);
+        }
+        
+        if (filters.direction && filters.direction !== 'both') {
+            sql += ' AND c.direction = ?';
+            params.push(filters.direction);
+        }
+        
+        sql += ' GROUP BY c.ip';
+        sql += ' ORDER BY connection_count DESC';
+        
+        if (filters.limit) {
+            sql += ' LIMIT ?';
+            params.push(parseInt(filters.limit));
+        }
+
+        return new Promise((resolve, reject) => {
+            this.db.all(sql, params, (err, rows) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    // Transform to match current API format
+                    const connections = rows.map(row => ({
+                        ip: row.ip,
+                        connectionCount: row.connection_count,
+                        inboundCount: row.inbound_count,
+                        outboundCount: row.outbound_count,
+                        lastSeen: row.last_seen,
+                        connectionTypes: row.connection_types ? row.connection_types.split(',') : [],
+                        directions: row.directions ? row.directions.split(',') : [],
+                        country: row.country || 'Unknown',
+                        countryCode: row.country_code || 'XX',
+                        region: row.region || 'Unknown',
+                        city: row.city || 'Unknown',
+                        latitude: row.latitude || 0,
+                        longitude: row.longitude || 0,
+                        timezone: row.timezone || 'Unknown',
+                        isp: row.isp || 'Unknown',
+                        org: row.org || 'Unknown',
+                        asn: row.asn || 'Unknown',
+                        hostname: row.hostname || 'No hostname found'
+                    }));
+                    resolve(connections);
+                }
+            });
+        });
+    }
+
+    // Insert or update geolocation data
+    async upsertGeolocation(ip, geoData) {
+        const sql = `
+            INSERT OR REPLACE INTO geolocations 
+            (ip, country, country_code, region, city, latitude, longitude, timezone, isp, org, asn, hostname, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        `;
+
+        return new Promise((resolve, reject) => {
+            this.db.run(sql, [
+                ip,
+                geoData.country,
+                geoData.countryCode,
+                geoData.region,
+                geoData.city,
+                geoData.latitude,
+                geoData.longitude,
+                geoData.timezone,
+                geoData.isp,
+                geoData.org,
+                geoData.asn,
+                geoData.hostname || 'No hostname found'
+            ], function(err) {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(this.changes);
+                }
+            });
+        });
+    }
+
+    // Get database statistics
+    async getStats() {
+        const queries = [
+            'SELECT COUNT(*) as total_connections FROM connections',
+            'SELECT COUNT(DISTINCT ip) as unique_ips FROM connections', 
+            'SELECT COUNT(*) as cached_geolocations FROM geolocations',
+            'SELECT MIN(timestamp) as oldest_record, MAX(timestamp) as newest_record FROM connections'
+        ];
+
+        const results = {};
+        
+        for (const query of queries) {
+            const result = await new Promise((resolve, reject) => {
+                this.db.get(query, (err, row) => {
+                    if (err) reject(err);
+                    else resolve(row);
+                });
+            });
+            Object.assign(results, result);
+        }
+        
+        return results;
+    }
+
+    // Get database file size in MB
+    async getDatabaseSizeMB() {
+        const fs = require('fs').promises;
+        try {
+            const stats = await fs.stat(this.dbPath);
+            return Math.round(stats.size / (1024 * 1024) * 100) / 100; // Round to 2 decimal places
+        } catch (error) {
+            console.warn('Could not get database file size:', error.message);
+            return 0;
+        }
+    }
+
+    // Clean up old records by age (time-based retention)
+    async cleanupByAge() {
+        if (!this.retentionConfig.enableTimeLimit) return 0;
+
+        const cutoffDate = new Date();
+        cutoffDate.setDate(cutoffDate.getDate() - this.retentionConfig.maxAgeDays);
+        const cutoffISO = cutoffDate.toISOString();
+        const maxAgeDays = this.retentionConfig.maxAgeDays;
+
+        const deleteSQL = `
+            DELETE FROM connections 
+            WHERE id IN (
+                SELECT id FROM connections 
+                WHERE timestamp < ?
+                ORDER BY timestamp ASC
+                LIMIT ?
+            )
+        `;
+
+        return new Promise((resolve, reject) => {
+            this.db.run(deleteSQL, [cutoffISO, this.retentionConfig.cleanupBatchSize], function(err) {
+                if (err) {
+                    reject(err);
+                } else {
+                    const deleted = this.changes;
+                    if (deleted > 0) {
+                        console.log(`Cleaned up ${deleted} records older than ${maxAgeDays} days`);
+                    }
+                    resolve(deleted);
+                }
+            });
+        });
+    }
+
+    // Clean up oldest records to maintain size limit (size-based retention)
+    async cleanupBySize() {
+        if (!this.retentionConfig.enableSizeLimit) return 0;
+
+        const currentSizeMB = await this.getDatabaseSizeMB();
+        if (currentSizeMB <= this.retentionConfig.maxSizeMB) return 0;
+        
+        const maxSizeMB = this.retentionConfig.maxSizeMB;
+
+        const deleteSQL = `
+            DELETE FROM connections 
+            WHERE id IN (
+                SELECT id FROM connections 
+                ORDER BY timestamp ASC 
+                LIMIT ?
+            )
+        `;
+
+        return new Promise((resolve, reject) => {
+            this.db.run(deleteSQL, [this.retentionConfig.cleanupBatchSize], function(err) {
+                if (err) {
+                    reject(err);
+                } else {
+                    const deleted = this.changes;
+                    if (deleted > 0) {
+                        console.log(`Cleaned up ${deleted} oldest records to maintain size limit (${currentSizeMB}MB > ${maxSizeMB}MB)`);
+                    }
+                    resolve(deleted);
+                }
+            });
+        });
+    }
+
+    // Clean up orphaned geolocation entries (IPs no longer in connections table)
+    async cleanupOrphanedGeolocations() {
+        const deleteSQL = `
+            DELETE FROM geolocations 
+            WHERE ip NOT IN (SELECT DISTINCT ip FROM connections)
+        `;
+
+        return new Promise((resolve, reject) => {
+            this.db.run(deleteSQL, function(err) {
+                if (err) {
+                    reject(err);
+                } else {
+                    const deleted = this.changes;
+                    if (deleted > 0) {
+                        console.log(`Cleaned up ${deleted} orphaned geolocation entries`);
+                    }
+                    resolve(deleted);
+                }
+            });
+        });
+    }
+
+    // Vacuum database to reclaim space after deletions
+    async vacuumDatabase() {
+        return new Promise((resolve, reject) => {
+            this.db.run('VACUUM', (err) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    console.log('Database vacuumed to reclaim space');
+                    resolve();
+                }
+            });
+        });
+    }
+
+    // Run all retention policies (main method to call)
+    async runRetentionPolicies() {
+        if (!this.isInitialized) {
+            console.warn('Database not initialized, skipping retention policies');
+            return { aged: 0, sized: 0, geolocations: 0 };
+        }
+
+        console.log('Running database retention policies...');
+        
+        const sizeBefore = await this.getDatabaseSizeMB();
+        
+        try {
+            // Run cleanup operations
+            const agedCleaned = await this.cleanupByAge();
+            const sizeCleaned = await this.cleanupBySize();
+            const geoCleaned = await this.cleanupOrphanedGeolocations();
+            
+            // Vacuum if we deleted anything significant
+            if (agedCleaned + sizeCleaned + geoCleaned > 1000) {
+                await this.vacuumDatabase();
+            }
+            
+            const sizeAfter = await this.getDatabaseSizeMB();
+            const spaceSaved = sizeBefore - sizeAfter;
+            
+            if (spaceSaved > 0.1) {
+                console.log(`Retention policies completed: ${spaceSaved.toFixed(2)}MB space reclaimed`);
+            }
+            
+            return {
+                aged: agedCleaned,
+                sized: sizeCleaned,
+                geolocations: geoCleaned,
+                sizeBefore: sizeBefore,
+                sizeAfter: sizeAfter,
+                spaceSaved: spaceSaved
+            };
+            
+        } catch (error) {
+            console.error('Error running retention policies:', error.message);
+            throw error;
+        }
+    }
+
+    // Close database connection
+    close() {
+        if (this.db) {
+            this.db.close((err) => {
+                if (err) {
+                    console.error('Error closing database:', err.message);
+                } else {
+                    console.log('Database connection closed');
+                }
+            });
+        }
+    }
+}
+
+module.exports = ConnectionsDatabase;

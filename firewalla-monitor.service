@@ -1,0 +1,17 @@
+[Unit]
+Description=Firewalla IP Monitor
+After=network.target
+
+[Service]
+Type=simple
+User=kdesch
+Group=kdesch
+WorkingDirectory=/home/kdesch/scripts/firewalla-ip-monitor
+ExecStart=/home/kdesch/scripts/firewalla-ip-monitor/start-monitor.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
