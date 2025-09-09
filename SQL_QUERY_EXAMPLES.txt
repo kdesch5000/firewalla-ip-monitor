@@ -1,0 +1,98 @@
+Firewalla IP Monitor - SQL Query Examples
+===========================================
+
+Database Location: /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db
+
+Tables and Key Columns:
+- connections: Main connection data (ip, timestamp, direction, connection_type, internal_ip, internal_port, external_port, state, orig_packets, orig_bytes, reply_packets, reply_bytes, details, source_file)
+- geolocations: IP geolocation cache (ip, country, country_code, region, city, latitude, longitude, timezone, isp, org, asn, hostname)
+
+Basic Connection Queries
+------------------------
+
+1. Total connection count:
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT COUNT(*) FROM connections;"
+
+2. Top 10 external IPs by connection count:
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT ip, COUNT(*) as connection_count FROM connections GROUP BY ip ORDER BY connection_count DESC LIMIT 10;"
+
+3. Recent connections (last 24 hours):
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT * FROM connections WHERE datetime(timestamp) > datetime('now', '-1 day') ORDER BY timestamp DESC LIMIT 20;"
+
+4. Connections by direction:
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT direction, COUNT(*) FROM connections GROUP BY direction;"
+
+Geolocation Analysis
+--------------------
+
+5. Connections by country (with geolocation join):
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT g.country, COUNT(*) as connection_count FROM connections c LEFT JOIN geolocations g ON c.ip = g.ip GROUP BY g.country ORDER BY connection_count DESC LIMIT 15;"
+
+6. Connections by city:
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT g.city, g.country, COUNT(*) as connection_count FROM connections c LEFT JOIN geolocations g ON c.ip = g.ip WHERE g.city IS NOT NULL GROUP BY g.city, g.country ORDER BY connection_count DESC LIMIT 20;"
+
+7. Show IP details with geolocation:
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT c.ip, g.country, g.region, g.city, g.isp, COUNT(*) as connections FROM connections c LEFT JOIN geolocations g ON c.ip = g.ip GROUP BY c.ip ORDER BY connections DESC LIMIT 10;"
+
+Time-based Analysis
+-------------------
+
+8. Connections per hour over last 24 hours:
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT strftime('%H', timestamp) as hour, COUNT(*) as connections FROM connections WHERE datetime(timestamp) > datetime('now', '-1 day') GROUP BY hour ORDER BY hour;"
+
+9. Daily connection summary:
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT DATE(timestamp) as date, COUNT(*) as total_connections, COUNT(DISTINCT ip) as unique_ips FROM connections WHERE DATE(timestamp) >= DATE('now', '-7 days') GROUP BY date ORDER BY date;"
+
+10. Busiest connection times:
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT strftime('%Y-%m-%d %H', timestamp) as hour_block, COUNT(*) as connections FROM connections GROUP BY hour_block ORDER BY connections DESC LIMIT 20;"
+
+Advanced Filtering
+------------------
+
+11. Connections from specific countries:
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT c.ip, c.timestamp, g.city FROM connections c LEFT JOIN geolocations g ON c.ip = g.ip WHERE g.country IN ('China', 'Russia') ORDER BY c.timestamp DESC LIMIT 50;"
+
+12. Suspicious high-frequency IPs (>100 connections):
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT ip, COUNT(*) as connection_count, MIN(timestamp) as first_seen, MAX(timestamp) as last_seen FROM connections GROUP BY ip HAVING connection_count > 100 ORDER BY connection_count DESC;"
+
+13. New IPs (first seen in last 24 hours):
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT ip, MIN(timestamp) as first_seen, COUNT(*) as connection_count FROM connections WHERE datetime(timestamp) > datetime('now', '-1 day') GROUP BY ip ORDER BY first_seen DESC;"
+
+Data Collection Source Analysis
+-------------------------------
+
+14. Connections by collection method (source_file field):
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT source_file, COUNT(*) FROM connections WHERE source_file IS NOT NULL GROUP BY source_file;"
+
+15. Connections with detailed JSON data:
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT ip, timestamp, details FROM connections WHERE details IS NOT NULL AND details != '' ORDER BY timestamp DESC LIMIT 10;"
+
+15b. Connection states breakdown:
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT state, COUNT(*) as count FROM connections WHERE state IS NOT NULL GROUP BY state ORDER BY count DESC;"
+
+15c. Internal IP analysis:
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT internal_ip, COUNT(*) as connections FROM connections WHERE internal_ip IS NOT NULL GROUP BY internal_ip ORDER BY connections DESC LIMIT 10;"
+
+Database Maintenance
+--------------------
+
+16. Database size and record counts:
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT 
+    (SELECT COUNT(*) FROM connections) as total_connections,
+    (SELECT COUNT(*) FROM geolocations) as cached_geolocations,
+    (SELECT COUNT(DISTINCT ip) FROM connections) as unique_external_ips;"
+
+17. Oldest and newest records:
+sqlite3 /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT 
+    (SELECT MIN(timestamp) FROM connections) as oldest_record,
+    (SELECT MAX(timestamp) FROM connections) as newest_record;"
+
+Usage Tips:
+-----------
+- Add -header -column flags for better formatted output: sqlite3 -header -column connections.db "query"
+- Export to CSV: sqlite3 -header -csv connections.db "query" > output.csv
+- Use EXPLAIN QUERY PLAN to analyze query performance for large datasets
+- Consider adding indexes for frequently queried columns if performance becomes an issue
+
+Example with formatting:
+sqlite3 -header -column /home/kdesch/scripts/firewalla-ip-monitor/data/connections.db "SELECT ip, COUNT(*) as connections FROM connections GROUP BY ip ORDER BY connections DESC LIMIT 5;"

@@ -540,41 +540,93 @@ app.get('/api/connections/history', async (req, res) => {
     try {
         const { startDate, endDate, direction, limit = 1000 } = req.query;
         
-        if (!global.rawConnectionData) {
-            await loadConnectionData();
-        }
+        // Build SQL query with filters
+        let query = `
+            SELECT c.*, g.country, g.region, g.city, g.latitude, g.longitude, g.isp
+            FROM connections c
+            LEFT JOIN geolocations g ON c.ip = g.ip
+        `;
         
-        let filteredConnections = [...(global.rawConnectionData || [])];
+        let whereConditions = [];
+        let params = [];
         
         // Apply date filtering
         if (startDate) {
-            const start = new Date(startDate);
-            filteredConnections = filteredConnections.filter(conn => 
-                new Date(conn.timestamp) >= start
-            );
+            whereConditions.push('datetime(c.timestamp) >= datetime(?)');
+            params.push(startDate);
         }
         
         if (endDate) {
-            const end = new Date(endDate);
-            filteredConnections = filteredConnections.filter(conn => 
-                new Date(conn.timestamp) <= end
-            );
+            whereConditions.push('datetime(c.timestamp) <= datetime(?)');
+            params.push(endDate);
         }
         
         // Apply direction filtering
         if (direction && direction !== 'both') {
-            filteredConnections = filteredConnections.filter(conn => 
-                conn.direction === direction
-            );
+            whereConditions.push('c.direction = ?');
+            params.push(direction);
         }
         
-        // Sort by timestamp (newest first) and limit results
-        filteredConnections.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-        filteredConnections = filteredConnections.slice(0, parseInt(limit));
+        if (whereConditions.length > 0) {
+            query += ' WHERE ' + whereConditions.join(' AND ');
+        }
+        
+        // Sort and limit
+        query += ' ORDER BY c.timestamp DESC LIMIT ?';
+        params.push(parseInt(limit));
+        
+        const rows = await new Promise((resolve, reject) => {
+            db.db.all(query, params, (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+        
+        // Transform to match expected format
+        const connections = rows.map(row => ({
+            timestamp: row.timestamp,
+            ip: row.ip,
+            direction: row.direction,
+            connection_type: row.connection_type,
+            internal_ip: row.internal_ip,
+            internal_port: row.internal_port,
+            external_port: row.external_port,
+            state: row.state,
+            orig_packets: row.orig_packets,
+            orig_bytes: row.orig_bytes,
+            reply_packets: row.reply_packets,
+            reply_bytes: row.reply_bytes,
+            country: row.country,
+            region: row.region,
+            city: row.city,
+            latitude: row.latitude,
+            longitude: row.longitude,
+            isp: row.isp,
+            details: row.details
+        }));
+        
+        // Get total count for the filtered query (without limit)
+        let countQuery = `
+            SELECT COUNT(*) as total
+            FROM connections c
+            LEFT JOIN geolocations g ON c.ip = g.ip
+        `;
+        
+        if (whereConditions.length > 0) {
+            countQuery += ' WHERE ' + whereConditions.join(' AND ');
+        }
+        
+        const countResult = await new Promise((resolve, reject) => {
+            db.db.get(countQuery, params.slice(0, -1), (err, row) => {
+                if (err) reject(err);
+                else resolve(row);
+            });
+        });
         
         res.json({
-            connections: filteredConnections,
-            totalCount: filteredConnections.length,
+            connections: connections,
+            totalCount: countResult.total,
+            filteredCount: connections.length,
             filters: { startDate, endDate, direction, limit }
         });
         
@@ -660,6 +712,36 @@ app.get('/api/connections/history-fast', async (req, res) => {
     } catch (error) {
         log(`Error serving fast historical connections: ${error.message}`);
         res.status(500).json({ error: 'Failed to load historical connection data from database' });
+    }
+});
+
+// API endpoint for database search
+app.get('/api/connections/search', async (req, res) => {
+    try {
+        const { q: searchTerm, startDate, endDate, direction, limit = 1000 } = req.query;
+        
+        const filters = {
+            startDate: startDate ? new Date(startDate).toISOString() : null,
+            endDate: endDate ? new Date(endDate).toISOString() : null,
+            direction: direction && direction !== 'both' ? direction : null,
+            limit: parseInt(limit)
+        };
+        
+        const connections = await db.searchConnections(searchTerm, filters);
+        
+        res.json({
+            connections: connections,
+            totalConnections: connections.length,
+            searchTerm: searchTerm || '',
+            lastUpdate: new Date().toISOString(),
+            homeLocation: CONFIG.homeLocation,
+            source: 'database',
+            filters: filters
+        });
+        
+    } catch (error) {
+        log(`Error in database search: ${error.message}`);
+        res.status(500).json({ error: 'Failed to search database' });
     }
 });
 

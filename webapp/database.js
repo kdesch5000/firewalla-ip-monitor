@@ -217,12 +217,12 @@ class ConnectionsDatabase {
         const params = [];
         
         if (filters.startDate) {
-            sql += ' AND c.timestamp >= ?';
+            sql += ' AND datetime(c.timestamp) >= datetime(?)';
             params.push(filters.startDate);
         }
         
         if (filters.endDate) {
-            sql += ' AND c.timestamp <= ?';
+            sql += ' AND datetime(c.timestamp) <= datetime(?)';
             params.push(filters.endDate);
         }
         
@@ -274,12 +274,12 @@ class ConnectionsDatabase {
         const params = [];
         
         if (filters.startDate) {
-            sql += ' AND c.timestamp >= ?';
+            sql += ' AND datetime(c.timestamp) >= datetime(?)';
             params.push(filters.startDate);
         }
         
         if (filters.endDate) {
-            sql += ' AND c.timestamp <= ?';
+            sql += ' AND datetime(c.timestamp) <= datetime(?)';
             params.push(filters.endDate);
         }
         
@@ -629,6 +629,107 @@ This is an automated message from the Firewalla IP Monitor system.`;
                 }
             });
         }
+    }
+
+    // Search connections with geolocation data
+    async searchConnections(searchTerm, filters = {}) {
+        if (!searchTerm || searchTerm.trim().length === 0) {
+            // If no search term, return aggregated connections with filters
+            return this.getAggregatedConnections(filters);
+        }
+
+        const term = `%${searchTerm.toLowerCase()}%`;
+        
+        let sql = `
+            SELECT c.ip,
+                   COUNT(*) as connection_count,
+                   SUM(CASE WHEN c.direction = 'inbound' THEN 1 ELSE 0 END) as inbound_count,
+                   SUM(CASE WHEN c.direction = 'outbound' THEN 1 ELSE 0 END) as outbound_count,
+                   MAX(c.timestamp) as last_seen,
+                   GROUP_CONCAT(DISTINCT c.connection_type) as connection_types,
+                   GROUP_CONCAT(DISTINCT c.direction) as directions,
+                   g.country, g.country_code, g.region, g.city, g.latitude, g.longitude,
+                   g.timezone, g.isp, g.org, g.asn, g.hostname
+            FROM connections c
+            LEFT JOIN geolocations g ON c.ip = g.ip
+            WHERE 1=1
+        `;
+        
+        const params = [];
+        
+        // Apply date filtering
+        if (filters.startDate) {
+            sql += ' AND datetime(c.timestamp) >= datetime(?)';
+            params.push(filters.startDate);
+        }
+        
+        if (filters.endDate) {
+            sql += ' AND datetime(c.timestamp) <= datetime(?)';
+            params.push(filters.endDate);
+        }
+        
+        // Apply direction filtering
+        if (filters.direction && filters.direction !== 'both') {
+            sql += ' AND c.direction = ?';
+            params.push(filters.direction);
+        }
+        
+        // Apply search term filtering - search across multiple fields
+        sql += ` AND (
+            LOWER(c.ip) LIKE ? OR 
+            LOWER(g.country) LIKE ? OR 
+            LOWER(g.region) LIKE ? OR 
+            LOWER(g.city) LIKE ? OR 
+            LOWER(g.isp) LIKE ? OR 
+            LOWER(g.org) LIKE ? OR 
+            LOWER(g.hostname) LIKE ?
+        )`;
+        
+        // Add the search term for each field
+        for (let i = 0; i < 7; i++) {
+            params.push(term);
+        }
+        
+        sql += `
+            GROUP BY c.ip, g.country, g.country_code, g.region, g.city, 
+                     g.latitude, g.longitude, g.timezone, g.isp, g.org, g.asn, g.hostname
+            ORDER BY connection_count DESC
+            LIMIT ?
+        `;
+        
+        params.push(filters.limit || 1000);
+        
+        return new Promise((resolve, reject) => {
+            this.db.all(sql, params, (err, rows) => {
+                if (err) {
+                    console.error('Database search error:', err.message);
+                    reject(err);
+                    return;
+                }
+                
+                const connections = rows.map(row => ({
+                    ip: row.ip,
+                    connectionCount: row.connection_count,
+                    inboundCount: row.inbound_count,
+                    outboundCount: row.outbound_count,
+                    lastSeen: row.last_seen,
+                    connectionTypes: row.connection_types ? row.connection_types.split(',') : [],
+                    directions: row.directions ? row.directions.split(',') : [],
+                    country: row.country || 'Unknown',
+                    countryCode: row.country_code || '',
+                    region: row.region || 'Unknown',
+                    city: row.city || 'Unknown',
+                    latitude: row.latitude || 0,
+                    longitude: row.longitude || 0,
+                    timezone: row.timezone || 'Unknown',
+                    isp: row.isp || 'Unknown',
+                    org: row.org || 'Unknown',
+                    asn: row.asn || 'Unknown',
+                    hostname: row.hostname || 'No hostname found'
+                }));
+                resolve(connections);
+            });
+        });
     }
 }
 

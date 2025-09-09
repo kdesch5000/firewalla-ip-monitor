@@ -1043,7 +1043,59 @@
             }
         }
         
-        // Filter connections based on search
+        // Database search for connections
+        async function searchDatabase(searchTerm = '') {
+            if (timeMode !== 'history') {
+                // For current connections, fall back to client-side filtering
+                filterConnections(searchTerm);
+                return;
+            }
+
+            try {
+                document.getElementById('loading').style.display = 'block';
+                document.getElementById('status').textContent = searchTerm ? `Searching for "${searchTerm}"...` : 'Loading connections...';
+                
+                let url = '/api/connections/search?limit=2000';
+                
+                if (searchTerm && searchTerm.trim().length > 0) {
+                    url += `&q=${encodeURIComponent(searchTerm.trim())}`;
+                }
+                
+                if (startDateTime) {
+                    url += `&startDate=${encodeURIComponent(startDateTime)}`;
+                }
+                
+                if (endDateTime) {
+                    url += `&endDate=${encodeURIComponent(endDateTime)}`;
+                }
+                
+                if (directionFilter !== 'both') {
+                    url += `&direction=${encodeURIComponent(directionFilter)}`;
+                }
+                
+                const response = await fetch(url);
+                const data = await response.json();
+                
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                
+                await processConnectionData(data, 'current');
+                
+                const resultText = searchTerm ? 
+                    `Found ${data.totalConnections} results for "${searchTerm}"` : 
+                    `Loaded ${data.totalConnections} connections`;
+                document.getElementById('status').textContent = resultText;
+                
+            } catch (error) {
+                console.error('Error searching database:', error);
+                document.getElementById('status').textContent = 'Error searching database';
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+            }
+        }
+
+        // Filter connections based on search (for current connections only)
         function filterConnections(searchTerm = '') {
             // Start with all connections
             let filtered = [...connectionsData];
@@ -1620,9 +1672,22 @@
             document.getElementById('timeHistoryBtn').addEventListener('click', () => setTimeMode('history'));
             document.getElementById('applyTimeFilter').addEventListener('click', applyTimeFilter);
             
-            // Set up search functionality
+            // Set up search functionality with debouncing
+            let searchTimeout;
             document.getElementById('searchBox').addEventListener('input', (e) => {
-                filterConnections(e.target.value);
+                const searchTerm = e.target.value;
+                
+                // Clear existing timeout
+                clearTimeout(searchTimeout);
+                
+                // Debounce the search - wait 300ms after user stops typing
+                searchTimeout = setTimeout(() => {
+                    if (timeMode === 'history') {
+                        searchDatabase(searchTerm);
+                    } else {
+                        filterConnections(searchTerm);
+                    }
+                }, 300);
             });
             
             // Set up CSV download button
