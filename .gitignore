@@ -1,0 +1,23 @@
+# Data files (contain potentially sensitive connection information)
+data/
+*.json
+
+# Logs
+*.log
+webapp/logs/
+monitor.log
+
+# Node modules
+webapp/node_modules/
+webapp/package-lock.json
+
+# Runtime files
+*.pid
+.DS_Store
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/

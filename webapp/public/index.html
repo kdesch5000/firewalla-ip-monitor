@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Firewalla WAN Connection Monitor</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1a1a1a;
+            color: #ffffff;
+        }
+        
+        .header {
+            background-color: #2d2d2d;
+            padding: 1rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .header h1 {
+            margin: 0;
+            color: #00ff88;
+            font-size: 1.5rem;
+        }
+        
+        .header .subtitle {
+            margin: 0.5rem 0 0 0;
+            color: #cccccc;
+            font-size: 0.9rem;
+        }
+        
+        .controls {
+            background-color: #333333;
+            padding: 1rem;
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        
+        .btn {
+            background-color: #0066cc;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+        
+        .btn:hover {
+            background-color: #0052a3;
+        }
+        
+        .btn:disabled {
+            background-color: #666666;
+            cursor: not-allowed;
+        }
+        
+        .btn.active {
+            background-color: #00ff88;
+            color: #000000;
+        }
+        
+        .status {
+            color: #cccccc;
+            font-size: 0.9rem;
+        }
+        
+        .stats {
+            display: flex;
+            gap: 2rem;
+            color: #00ff88;
+        }
+        
+        .stat-item {
+            text-align: center;
+        }
+        
+        .stat-number {
+            font-size: 1.2rem;
+            font-weight: bold;
+        }
+        
+        .stat-label {
+            font-size: 0.8rem;
+            color: #cccccc;
+        }
+        
+        #map {
+            height: calc(100vh - 140px);
+            background-color: #1a1a1a;
+        }
+        
+        .connection-popup {
+            background-color: #2d2d2d;
+            color: #ffffff;
+            border-radius: 4px;
+            font-size: 0.9rem;
+        }
+        
+        .connection-popup h3 {
+            margin: 0 0 0.5rem 0;
+            color: #00ff88;
+        }
+        
+        .connection-popup .detail {
+            margin: 0.25rem 0;
+        }
+        
+        .connection-popup .label {
+            font-weight: bold;
+            color: #cccccc;
+        }
+        
+        .loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: rgba(0, 0, 0, 0.8);
+            color: #ffffff;
+            padding: 2rem;
+            border-radius: 8px;
+            text-align: center;
+        }
+        
+        .spinner {
+            border: 4px solid #333333;
+            border-top: 4px solid #00ff88;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 1rem;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .error {
+            background-color: #ff4444;
+            color: white;
+            padding: 1rem;
+            margin: 1rem;
+            border-radius: 4px;
+            text-align: center;
+        }
+        
+        /* Connections List Styles */
+        #connectionsList {
+            display: none;
+            height: calc(100vh - 140px);
+            overflow-y: auto;
+            background-color: #1a1a1a;
+            padding: 1rem;
+        }
+        
+        .connections-table {
+            width: 100%;
+            border-collapse: collapse;
+            background-color: #2d2d2d;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        .connections-table th {
+            background-color: #333333;
+            color: #00ff88;
+            padding: 1rem;
+            text-align: left;
+            font-weight: bold;
+            border-bottom: 2px solid #00ff88;
+        }
+        
+        .connections-table td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid #444444;
+            color: #ffffff;
+        }
+        
+        .connections-table tr:hover {
+            background-color: #3d3d3d;
+        }
+        
+        .connections-table .ip-cell {
+            font-family: 'Courier New', monospace;
+            color: #00ccff;
+        }
+        
+        .connections-table .hostname-cell {
+            color: #ffaa00;
+            font-size: 0.9rem;
+        }
+        
+        .connections-table .location-cell {
+            color: #cccccc;
+        }
+        
+        .connections-table .count-cell {
+            text-align: center;
+            font-weight: bold;
+            color: #00ff88;
+        }
+        
+        .connections-table .date-cell {
+            font-size: 0.9rem;
+            color: #999999;
+        }
+        
+        .flag-icon {
+            width: 20px;
+            height: auto;
+            margin-right: 0.5rem;
+            vertical-align: middle;
+        }
+        
+        .search-box {
+            width: 100%;
+            padding: 0.75rem;
+            margin-bottom: 1rem;
+            background-color: #333333;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            color: #ffffff;
+            font-size: 1rem;
+        }
+        
+        .search-box::placeholder {
+            color: #999999;
+        }
+        
+        .table-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+        
+        .sort-controls {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+        }
+        
+        .sort-btn {
+            background-color: #444444;
+            color: #cccccc;
+            border: none;
+            padding: 0.5rem 0.75rem;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 0.8rem;
+        }
+        
+        .sort-btn:hover {
+            background-color: #555555;
+        }
+        
+        .sort-btn.active {
+            background-color: #0066cc;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🌐 Firewalla WAN Connection Monitor</h1>
+        <div class="subtitle">Real-time visualization of external IP connections to your network</div>
+    </div>
+    
+    <div class="controls">
+        <button id="refreshBtn" class="btn">🔄 Refresh Data</button>
+        <button id="mapViewBtn" class="btn active">🗺️ Map View</button>
+        <button id="listViewBtn" class="btn">📋 Connections List</button>
+        <div class="status" id="status">Loading...</div>
+        <div class="stats">
+            <div class="stat-item">
+                <div class="stat-number" id="connectionCount">-</div>
+                <div class="stat-label">Connections</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-number" id="lastUpdate">-</div>
+                <div class="stat-label">Last Update</div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="map"></div>
+    
+    <div id="connectionsList">
+        <div class="table-controls">
+            <input type="text" id="searchBox" class="search-box" placeholder="🔍 Search by IP, hostname, city, country, or ISP...">
+            <div class="sort-controls">
+                <span style="color: #cccccc; font-size: 0.9rem;">Sort by:</span>
+                <button class="sort-btn active" data-sort="connectionCount">Connections</button>
+                <button class="sort-btn" data-sort="lastSeen">Last Seen</button>
+                <button class="sort-btn" data-sort="country">Country</button>
+                <button class="sort-btn" data-sort="ip">IP Address</button>
+            </div>
+        </div>
+        
+        <table class="connections-table">
+            <thead>
+                <tr>
+                    <th>IP Address</th>
+                    <th>Hostname</th>
+                    <th>Location</th>
+                    <th>ISP / Organization</th>
+                    <th>Connections</th>
+                    <th>Last Seen</th>
+                </tr>
+            </thead>
+            <tbody id="connectionsTableBody">
+                <!-- Table rows will be populated by JavaScript -->
+            </tbody>
+        </table>
+    </div>
+    
+    <div id="loading" class="loading" style="display: none;">
+        <div class="spinner"></div>
+        <div>Loading connection data...</div>
+    </div>
+    
+    <!-- Leaflet JavaScript -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <script>
+        // Global variables
+        let map;
+        let markers = [];
+        let connectionsData = [];
+        let filteredData = [];
+        let currentView = 'map';
+        let sortField = 'connectionCount';
+        let sortDirection = 'desc';
+        
+        // Initialize map
+        function initMap() {
+            map = L.map('map').setView([39.8283, -98.5795], 4); // Center on USA
+            
+            // Dark theme tile layer
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                attribution: '© OpenStreetMap contributors © CARTO',
+                subdomains: 'abcd',
+                maxZoom: 19
+            }).addTo(map);
+        }
+        
+        // Clear existing markers
+        function clearMarkers() {
+            markers.forEach(marker => map.removeLayer(marker));
+            markers = [];
+        }
+        
+        // Add markers for connections
+        function addConnectionMarkers(connections) {
+            clearMarkers();
+            
+            connections.forEach(connection => {
+                if (connection.latitude && connection.longitude) {
+                    // Create custom icon based on connection count
+                    const size = Math.min(Math.max(connection.connectionCount / 5 + 10, 10), 30);
+                    const color = connection.connectionCount > 50 ? '#ff4444' : 
+                                 connection.connectionCount > 20 ? '#ffaa00' : '#00ff88';
+                    
+                    const marker = L.circleMarker([connection.latitude, connection.longitude], {
+                        radius: size / 2,
+                        fillColor: color,
+                        color: '#ffffff',
+                        weight: 2,
+                        opacity: 0.8,
+                        fillOpacity: 0.6
+                    }).addTo(map);
+                    
+                    // Create popup content
+                    const popupContent = `
+                        <div class="connection-popup">
+                            <h3>${connection.ip}</h3>
+                            <div class="detail"><span class="label">Location:</span> ${connection.city}, ${connection.region}, ${connection.country}</div>
+                            <div class="detail"><span class="label">ISP:</span> ${connection.isp || 'Unknown'}</div>
+                            <div class="detail"><span class="label">Organization:</span> ${connection.org || 'Unknown'}</div>
+                            <div class="detail"><span class="label">ASN:</span> ${connection.asn || 'Unknown'}</div>
+                            <div class="detail"><span class="label">Connections:</span> ${connection.connectionCount}</div>
+                            <div class="detail"><span class="label">Last Seen:</span> ${new Date(connection.lastSeen).toLocaleString()}</div>
+                            <div class="detail"><span class="label">Timezone:</span> ${connection.timezone || 'Unknown'}</div>
+                        </div>
+                    `;
+                    
+                    marker.bindPopup(popupContent);
+                    markers.push(marker);
+                }
+            });
+        }
+        
+        // Switch between map and list views
+        function switchView(view) {
+            currentView = view;
+            
+            if (view === 'map') {
+                document.getElementById('map').style.display = 'block';
+                document.getElementById('connectionsList').style.display = 'none';
+                document.getElementById('mapViewBtn').classList.add('active');
+                document.getElementById('listViewBtn').classList.remove('active');
+                
+                // Trigger map resize in case it was hidden
+                if (map) {
+                    setTimeout(() => map.invalidateSize(), 100);
+                }
+            } else {
+                document.getElementById('map').style.display = 'none';
+                document.getElementById('connectionsList').style.display = 'block';
+                document.getElementById('mapViewBtn').classList.remove('active');
+                document.getElementById('listViewBtn').classList.add('active');
+                
+                // Populate the table
+                populateConnectionsTable();
+            }
+        }
+        
+        // Cache for resolved hostnames to avoid repeated API calls
+        const hostnameCache = new Map();
+        
+        // Resolve hostname using server-side DNS lookup
+        async function resolveHostname(ip) {
+            // Check cache first
+            if (hostnameCache.has(ip)) {
+                return hostnameCache.get(ip);
+            }
+            
+            try {
+                const response = await fetch(`/api/hostname/${ip}`);
+                const data = await response.json();
+                
+                if (data.hostname) {
+                    hostnameCache.set(ip, data.hostname);
+                    return data.hostname;
+                }
+            } catch (error) {
+                console.log(`Server-side hostname resolution failed for ${ip}:`, error);
+            }
+            
+            const result = 'No hostname found';
+            hostnameCache.set(ip, result);
+            return result;
+        }
+        
+        // Populate connections table
+        async function populateConnectionsTable() {
+            const tableBody = document.getElementById('connectionsTableBody');
+            tableBody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #999;">Loading hostnames...</td></tr>';
+            
+            // Sort the data
+            const sortedData = [...filteredData].sort((a, b) => {
+                let aVal = a[sortField];
+                let bVal = b[sortField];
+                
+                if (sortField === 'connectionCount') {
+                    return sortDirection === 'desc' ? bVal - aVal : aVal - bVal;
+                } else if (sortField === 'lastSeen') {
+                    return sortDirection === 'desc' ? 
+                        new Date(bVal) - new Date(aVal) : 
+                        new Date(aVal) - new Date(bVal);
+                } else {
+                    if (typeof aVal === 'string') aVal = aVal.toLowerCase();
+                    if (typeof bVal === 'string') bVal = bVal.toLowerCase();
+                    if (sortDirection === 'desc') {
+                        return bVal > aVal ? 1 : bVal < aVal ? -1 : 0;
+                    } else {
+                        return aVal > bVal ? 1 : aVal < bVal ? -1 : 0;
+                    }
+                }
+            });
+            
+            tableBody.innerHTML = '';
+            
+            // Process each connection with hostname resolution
+            for (const connection of sortedData) {
+                const row = document.createElement('tr');
+                
+                // Use hostname from server data if available, otherwise resolve
+                const hostname = connection.hostname && connection.hostname !== 'No hostname found' 
+                    ? connection.hostname 
+                    : await Promise.race([
+                        resolveHostname(connection.ip),
+                        new Promise(resolve => setTimeout(() => resolve('Resolving...'), 2000))
+                    ]);
+                
+                row.innerHTML = `
+                    <td class="ip-cell">${connection.ip}</td>
+                    <td class="hostname-cell">${hostname}</td>
+                    <td class="location-cell">
+                        <img src="https://flagsapi.com/${connection.countryCode}/flat/32.png" 
+                             class="flag-icon" alt="${connection.countryCode}" 
+                             onerror="this.style.display='none'">
+                        ${connection.city}, ${connection.region}<br>
+                        <small>${connection.country}</small>
+                    </td>
+                    <td class="location-cell">
+                        <strong>${connection.isp || 'Unknown ISP'}</strong><br>
+                        <small>${connection.org || 'Unknown Org'}</small><br>
+                        <small style="color: #666;">${connection.asn || 'Unknown ASN'}</small>
+                    </td>
+                    <td class="count-cell">${connection.connectionCount}</td>
+                    <td class="date-cell">${new Date(connection.lastSeen).toLocaleString()}</td>
+                `;
+                
+                tableBody.appendChild(row);
+            }
+        }
+        
+        // Filter connections based on search
+        function filterConnections(searchTerm) {
+            if (!searchTerm) {
+                filteredData = [...connectionsData];
+            } else {
+                const term = searchTerm.toLowerCase();
+                filteredData = connectionsData.filter(conn => 
+                    conn.ip.toLowerCase().includes(term) ||
+                    (conn.city && conn.city.toLowerCase().includes(term)) ||
+                    (conn.region && conn.region.toLowerCase().includes(term)) ||
+                    (conn.country && conn.country.toLowerCase().includes(term)) ||
+                    (conn.isp && conn.isp.toLowerCase().includes(term)) ||
+                    (conn.org && conn.org.toLowerCase().includes(term))
+                );
+            }
+            
+            if (currentView === 'list') {
+                populateConnectionsTable();
+            }
+        }
+        
+        // Load connections data
+        async function loadConnections() {
+            try {
+                document.getElementById('loading').style.display = 'block';
+                
+                const response = await fetch('/api/connections');
+                const data = await response.json();
+                
+                connectionsData = data.connections;
+                filteredData = [...connectionsData]; // Initialize filtered data
+                
+                // Update UI
+                document.getElementById('connectionCount').textContent = data.totalConnections;
+                document.getElementById('lastUpdate').textContent = new Date(data.lastUpdate).toLocaleString();
+                document.getElementById('status').textContent = `Loaded ${data.totalConnections} connections`;
+                
+                // Add markers to map
+                addConnectionMarkers(connectionsData);
+                
+                // Fit map to show all markers if we have connections
+                if (connectionsData.length > 0 && currentView === 'map') {
+                    const group = new L.featureGroup(markers);
+                    map.fitBounds(group.getBounds().pad(0.1));
+                }
+                
+                // Update table if in list view
+                if (currentView === 'list') {
+                    populateConnectionsTable();
+                }
+                
+            } catch (error) {
+                console.error('Error loading connections:', error);
+                document.getElementById('status').textContent = 'Error loading data';
+                
+                // Show error message
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'error';
+                errorDiv.textContent = 'Failed to load connection data. Check console for details.';
+                document.body.appendChild(errorDiv);
+                
+                setTimeout(() => document.body.removeChild(errorDiv), 5000);
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+            }
+        }
+        
+        // Refresh data
+        async function refreshData() {
+            const btn = document.getElementById('refreshBtn');
+            btn.disabled = true;
+            btn.textContent = '🔄 Refreshing...';
+            
+            try {
+                const response = await fetch('/api/refresh', { method: 'POST' });
+                const result = await response.json();
+                
+                document.getElementById('status').textContent = 'Data refresh initiated...';
+                
+                // Reload connections after a delay
+                setTimeout(loadConnections, 3000);
+                
+            } catch (error) {
+                console.error('Error refreshing data:', error);
+                document.getElementById('status').textContent = 'Error refreshing data';
+            } finally {
+                setTimeout(() => {
+                    btn.disabled = false;
+                    btn.textContent = '🔄 Refresh Data';
+                }, 5000);
+            }
+        }
+        
+        // Update table view
+        function updateTable() {
+            if (currentView === 'list') {
+                populateConnectionsTable();
+            }
+        }
+        
+        // Initialize application
+        function init() {
+            initMap();
+            loadConnections();
+            
+            // Set up refresh button
+            document.getElementById('refreshBtn').addEventListener('click', refreshData);
+            
+            // Set up view switching buttons
+            document.getElementById('mapViewBtn').addEventListener('click', () => switchView('map'));
+            document.getElementById('listViewBtn').addEventListener('click', () => switchView('list'));
+            
+            // Set up search functionality
+            document.getElementById('searchBox').addEventListener('input', (e) => {
+                filterConnections(e.target.value);
+            });
+            
+            // Set up sort buttons
+            document.querySelectorAll('.sort-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const field = e.target.dataset.sort;
+                    
+                    // Toggle sort direction if same field
+                    if (sortField === field) {
+                        sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+                    } else {
+                        sortField = field;
+                        sortDirection = 'asc';
+                    }
+                    
+                    // Update button states
+                    document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
+                    e.target.classList.add('active');
+                    
+                    // Re-render table
+                    updateTable();
+                });
+            });
+            
+            // Auto-refresh every 10 minutes
+            setInterval(loadConnections, 10 * 60 * 1000);
+        }
+        
+        // Start when page loads
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
