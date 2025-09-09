@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # Configuration - UPDATE THESE VALUES FOR YOUR SETUP
-FIREWALLA_HOST="192.168.1.1"        # Your Firewalla IP address
+FIREWALLA_HOST="192.168.86.1"        # Your Firewalla IP address
 FIREWALLA_USER="pi"                  # SSH username (typically 'pi')
 DATA_DIR="$(dirname "$0")/data"      # Data directory (relative to script)
 LOG_FILE="$(dirname "$0")/monitor.log" # Log file location
@@ -415,6 +415,103 @@ collect_connection_tracking() {
     log "Connection tracking data saved to: ${output_file}"
 }
 
+# Collect threat intelligence data from FireMain logs
+collect_threat_intel() {
+    local output_file="${DATA_DIR}/threat_intel_$(date +%Y%m%d_%H%M%S).json"
+    
+    log "Collecting threat intelligence data from FireMain logs..."
+    
+    {
+        echo "["
+        local first=true
+        
+        # Extract threat intelligence data with IP, subdomain, and domain info
+        ssh "${FIREWALLA_USER}@${FIREWALLA_HOST}" "grep 'DestIPFoundHook.*d: [0-9]' /home/pi/logs/FireMain*.log | tail -200" | while read line; do
+            # Extract timestamp and intel data from format:
+            # 2025-09-09 09:38:39 ERROR DestIPFoundHook: got error when calling intel proxy, err: Error: socket hang up d: 146.75.78.73,p19-oec-ttp.tiktokcdn-us.com,tiktokcdn-us.com
+            if [[ $line =~ ^[^:]*:([0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}).*d:\ ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+),?([^,]*),?([^,]*)$ ]]; then
+                local timestamp="${BASH_REMATCH[1]}"
+                local external_ip="${BASH_REMATCH[2]}"
+                local subdomain="${BASH_REMATCH[3]}"
+                local domain="${BASH_REMATCH[4]}"
+                
+                # Only process external (non-private) IPs
+                if [[ ! "$external_ip" =~ ^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.) ]]; then
+                    if [[ "$first" == true ]]; then
+                        first=false
+                    else
+                        echo ","
+                    fi
+                    
+                    # Clean up domain fields (remove trailing whitespace)
+                    subdomain=$(echo "$subdomain" | tr -d ' ')
+                    domain=$(echo "$domain" | tr -d ' ')
+                    
+                    echo -n "    {\"timestamp\": \"$timestamp\", \"external_ip\": \"$external_ip\", \"subdomain\": \"$subdomain\", \"domain\": \"$domain\", \"type\": \"threat_intel\", \"source\": \"DestIPFoundHook\", \"collected_at\": \"$(date -Iseconds)\"}"
+                fi
+            fi
+        done
+        
+        echo ""
+        echo "]"
+    } > "${output_file}"
+    
+    log "Threat intelligence data saved to: ${output_file}"
+}
+
+# Enhanced FireMain parsing for additional external IP patterns
+collect_enhanced_firemain() {
+    local output_file="${DATA_DIR}/enhanced_firemain_$(date +%Y%m%d_%H%M%S).json"
+    
+    log "Collecting enhanced FireMain data for additional external IP patterns..."
+    
+    local temp_file=$(mktemp)
+    
+    # Get broader external IP patterns from FireMain logs (not just BroDetect)
+    ssh "${FIREWALLA_USER}@${FIREWALLA_HOST}" "grep -E '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' /home/pi/logs/FireMain*.log | tail -500" > "${temp_file}"
+    
+    {
+        echo "["
+        local first=true
+        
+        while read line; do
+            # Extract timestamp from the beginning of the line
+            if [[ $line =~ ^[^:]*:([0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}) ]]; then
+                local timestamp="${BASH_REMATCH[1]}"
+                
+                # Extract log level and component
+                local log_level=""
+                local component=""
+                if [[ $line =~ (INFO|ERROR|WARN|DEBUG)\ ([^:]+): ]]; then
+                    log_level="${BASH_REMATCH[1]}"
+                    component="${BASH_REMATCH[2]}"
+                fi
+                
+                # Extract first external IP address from the line
+                local ip=$(echo "$line" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+                
+                # Skip private IPs
+                if [[ -n "$ip" && ! "$ip" =~ ^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.) ]]; then
+                    if [[ "$first" == true ]]; then
+                        first=false
+                    else
+                        echo ","
+                    fi
+                    
+                    echo -n "    {\"timestamp\": \"$timestamp\", \"external_ip\": \"$ip\", \"log_level\": \"$log_level\", \"component\": \"$component\", \"type\": \"enhanced_firemain\", \"collected_at\": \"$(date -Iseconds)\"}"
+                fi
+            fi
+        done < "${temp_file}"
+        
+        echo ""
+        echo "]"
+    } > "${output_file}"
+    
+    rm -f "${temp_file}"
+    
+    log "Enhanced FireMain data saved to: ${output_file}"
+}
+
 # Comprehensive collection function
 main() {
     log "Starting comprehensive WAN connection monitoring collection..."
@@ -441,6 +538,8 @@ collect_all() {
     collect_vpn_connections
     collect_outbound_connections
     collect_connection_tracking
+    collect_threat_intel
+    collect_enhanced_firemain
     
     log "Full collection completed - check data directory for all files"
 }
@@ -465,6 +564,12 @@ case "${1:-}" in
     "--conntrack")
         collect_connection_tracking
         ;;
+    "--threat-intel")
+        collect_threat_intel
+        ;;
+    "--enhanced-firemain")
+        collect_enhanced_firemain
+        ;;
     "--all")
         collect_all
         ;;
@@ -477,6 +582,8 @@ case "${1:-}" in
         echo "  --realtime    Collect real-time connection data only"
         echo "  --outbound    Collect outbound connections only"
         echo "  --conntrack   Collect connection tracking table data only"
+        echo "  --threat-intel  Collect threat intelligence data from FireMain logs"
+        echo "  --enhanced-firemain  Collect additional external IPs from FireMain logs"
         echo "  --all         Run ALL collection methods (comprehensive)"
         echo "  --help        Show this help"
         echo "  (no args)     Run standard comprehensive collection"
