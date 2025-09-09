@@ -28,9 +28,13 @@ if [[ ! -d "${WEBAPP_DIR}/node_modules" ]]; then
     npm install
 fi
 
-# Collect initial data
+# Collect initial data (skip if SSH connection fails)
 echo -e "${BLUE}📊 Collecting initial connection data...${NC}"
-"${SCRIPT_DIR}/collect_wan_connections.sh" --firemain
+if "${SCRIPT_DIR}/collect_wan_connections.sh" --firemain; then
+    echo -e "${GREEN}✅ Initial data collection successful${NC}"
+else
+    echo -e "${BLUE}ℹ️  Skipping initial data collection (SSH connection failed - will use existing data)${NC}"
+fi
 
 # Check if port 3001 is available
 if netstat -tuln | grep -q ":3001 "; then
@@ -42,7 +46,7 @@ fi
 echo -e "${GREEN}✅ Starting web server on port 3001...${NC}"
 echo -e "${GREEN}🌍 Access the monitor at:${NC}"
 echo -e "  ${BLUE}• Local: http://localhost:3001${NC}"
-echo -e "  ${BLUE}• Network: http://unifi.mf:3001${NC}"
+echo -e "  ${BLUE}• Network: http://[your-server]:3001${NC}"
 echo -e "  ${BLUE}• IP: http://$(hostname -I | awk '{print $1}'):3001${NC}"
 echo
 echo -e "${GREEN}💡 Tips:${NC}"

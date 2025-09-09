@@ -48,13 +48,16 @@ const WAN_IP_CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 const GEOLOCATION_CACHE_FILE = path.join(CONFIG.dataDir, 'geolocation_cache.json');
 let geolocationCache = new Map();
 
-// Database instance with retention policies
+// Database instance with retention policies and email notifications
 const db = new ConnectionsDatabase('../data/connections.db', {
-    maxSizeMB: 500,        // 500MB max database size
+    maxSizeMB: 10240,      // 10GB max database size
     maxAgeDays: 30,        // 30 days retention
     cleanupBatchSize: 5000, // Delete 5000 records per cleanup batch
     enableSizeLimit: true,
-    enableTimeLimit: true
+    enableTimeLimit: true,
+    // Email notification settings (uses system mail command)
+    enableEmailNotifications: true,
+    emailRecipient: 'admin@example.com'
 });
 
 // Logging function

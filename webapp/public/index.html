@@ -21,18 +21,66 @@
             background-color: #2d2d2d;
             padding: 1rem;
             box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 1rem;
         }
         
-        .header h1 {
+        .header-main h1 {
             margin: 0;
             color: #00ff88;
             font-size: 1.5rem;
         }
         
-        .header .subtitle {
+        .header-main .subtitle {
             margin: 0.5rem 0 0 0;
             color: #cccccc;
             font-size: 0.9rem;
+        }
+        
+        .header-stats {
+            display: flex;
+            gap: 2rem;
+            align-items: center;
+        }
+        
+        .stat-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        
+        .stat-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-width: 100px;
+        }
+        
+        .stat-label {
+            font-size: 0.75rem;
+            color: #999999;
+            margin-bottom: 0.2rem;
+        }
+        
+        .stat-value {
+            font-size: 1rem;
+            color: #00ff88;
+            font-weight: bold;
+        }
+        
+        @media (max-width: 768px) {
+            .header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            
+            .header-stats {
+                width: 100%;
+                justify-content: space-around;
+            }
         }
         
         .controls {
@@ -372,12 +420,125 @@
             color: #00ff88;
             font-weight: bold;
         }
+        
+        /* Pagination Styles */
+        .pagination-controls {
+            background-color: #333333;
+            padding: 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-top: 1px solid #444444;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+        
+        .pagination-info {
+            color: #cccccc;
+            font-size: 0.9rem;
+        }
+        
+        .pagination-settings {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .page-size-select {
+            background-color: #444444;
+            color: #ffffff;
+            border: 1px solid #555555;
+            padding: 0.25rem;
+            border-radius: 4px;
+            font-size: 0.9rem;
+        }
+        
+        .pagination-buttons {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .pagination-btn {
+            background-color: #0066cc;
+            color: white;
+            border: none;
+            padding: 0.4rem 0.8rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: background-color 0.2s;
+        }
+        
+        .pagination-btn:hover:not(:disabled) {
+            background-color: #0080ff;
+        }
+        
+        .pagination-btn:disabled {
+            background-color: #555555;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+        
+        .page-jump {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .page-jump-input {
+            width: 60px;
+            background-color: #444444;
+            color: #ffffff;
+            border: 1px solid #555555;
+            padding: 0.25rem;
+            border-radius: 4px;
+            text-align: center;
+            font-size: 0.9rem;
+        }
+        
+        @media (max-width: 768px) {
+            .pagination-controls {
+                flex-direction: column;
+                align-items: stretch;
+                text-align: center;
+            }
+            
+            .pagination-buttons {
+                justify-content: center;
+                flex-wrap: wrap;
+            }
+        }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>🌐 Firewalla WAN Connection Monitor</h1>
-        <div class="subtitle">Real-time visualization of external IP connections to your network</div>
+        <div class="header-main">
+            <h1>🌐 Firewalla WAN Connection Monitor</h1>
+            <div class="subtitle">Real-time visualization of external IP connections to your network</div>
+        </div>
+        <div class="header-stats">
+            <div class="stat-group">
+                <div class="stat-item">
+                    <span class="stat-label">Database Size</span>
+                    <span class="stat-value" id="headerDbSize">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Oldest Record</span>
+                    <span class="stat-value" id="headerOldestRecord">--</span>
+                </div>
+            </div>
+            <div class="stat-group">
+                <div class="stat-item">
+                    <span class="stat-label">Total Connections</span>
+                    <span class="stat-value" id="headerTotalConnections">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Unique IPs</span>
+                    <span class="stat-value" id="headerUniqueIPs">--</span>
+                </div>
+            </div>
+        </div>
     </div>
     
     <div class="controls">
@@ -431,14 +592,6 @@
                 <span class="legend-text">Low <span class="legend-count">(1-20)</span></span>
             </div>
         </div>
-        <div class="legend-divider"></div>
-        <div class="database-stats">
-            <div class="legend-title">💾 Database:</div>
-            <div class="db-info">
-                <span class="db-stat" id="dbSize">Size: <span class="db-value">--</span></span>
-                <span class="db-stat" id="oldestRecord">Oldest: <span class="db-value">--</span></span>
-            </div>
-        </div>
         <div style="margin-left: auto; color: #999999; font-size: 0.8rem;">
             Line color and thickness indicate total connection count from each IP
         </div>
@@ -479,6 +632,33 @@
                 <!-- Table rows will be populated by JavaScript -->
             </tbody>
         </table>
+        
+        <div class="pagination-controls">
+            <div class="pagination-info">
+                <span id="paginationInfo">Showing -- of --</span>
+            </div>
+            <div class="pagination-settings">
+                <span style="color: #cccccc; font-size: 0.9rem;">Show:</span>
+                <select id="pageSizeSelect" class="page-size-select">
+                    <option value="20" selected>20</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                    <option value="200">200</option>
+                </select>
+                <span style="color: #cccccc; font-size: 0.9rem;">per page</span>
+            </div>
+            <div class="pagination-buttons">
+                <button id="firstPageBtn" class="pagination-btn" disabled>⏪ First</button>
+                <button id="prevPageBtn" class="pagination-btn" disabled>◀ Previous</button>
+                <div class="page-jump">
+                    <span style="color: #cccccc; font-size: 0.9rem;">Page:</span>
+                    <input type="number" id="pageJumpInput" class="page-jump-input" value="1" min="1">
+                    <span id="totalPagesSpan" style="color: #cccccc; font-size: 0.9rem;">of --</span>
+                </div>
+                <button id="nextPageBtn" class="pagination-btn" disabled>Next ▶</button>
+                <button id="lastPageBtn" class="pagination-btn" disabled>Last ⏩</button>
+            </div>
+        </div>
     </div>
     
     <div id="loading" class="loading" style="display: none;">
@@ -505,6 +685,12 @@
         let timeMode = 'current'; // 'current', 'history'
         let startDateTime = null;
         let endDateTime = null;
+        
+        // Pagination variables
+        let currentPage = 1;
+        let pageSize = 20;
+        let totalRows = 0;
+        let totalPages = 0;
         
         // Initialize map
         function initMap() {
@@ -733,12 +919,41 @@
             return result;
         }
         
-        // Populate connections table
-        async function populateConnectionsTable() {
-            const tableBody = document.getElementById('connectionsTableBody');
-            tableBody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #999;">Loading hostnames...</td></tr>';
+        // Update pagination UI elements
+        function updatePaginationUI() {
+            // Update pagination info
+            const startRecord = totalRows === 0 ? 0 : (currentPage - 1) * pageSize + 1;
+            const endRecord = Math.min(currentPage * pageSize, totalRows);
+            document.getElementById('paginationInfo').textContent = 
+                `Showing ${startRecord}-${endRecord} of ${totalRows.toLocaleString()}`;
             
-            // Sort the data
+            // Update total pages
+            document.getElementById('totalPagesSpan').textContent = `of ${totalPages.toLocaleString()}`;
+            
+            // Update page jump input
+            const pageJumpInput = document.getElementById('pageJumpInput');
+            pageJumpInput.value = currentPage;
+            pageJumpInput.max = totalPages;
+            
+            // Update button states
+            document.getElementById('firstPageBtn').disabled = currentPage === 1 || totalPages === 0;
+            document.getElementById('prevPageBtn').disabled = currentPage === 1 || totalPages === 0;
+            document.getElementById('nextPageBtn').disabled = currentPage === totalPages || totalPages === 0;
+            document.getElementById('lastPageBtn').disabled = currentPage === totalPages || totalPages === 0;
+        }
+        
+        // Navigate to specific page
+        function goToPage(page) {
+            const newPage = Math.max(1, Math.min(page, totalPages));
+            if (newPage !== currentPage) {
+                currentPage = newPage;
+                populateConnectionsTable();
+            }
+        }
+        
+        // Populate connections table with pagination
+        async function populateConnectionsTable() {
+            // Sort the data first
             const sortedData = [...filteredData].sort((a, b) => {
                 let aVal = a[sortField];
                 let bVal = b[sortField];
@@ -760,10 +975,32 @@
                 }
             });
             
+            // Update pagination info
+            totalRows = sortedData.length;
+            totalPages = Math.ceil(totalRows / pageSize);
+            
+            // Ensure current page is valid
+            if (currentPage > totalPages && totalPages > 0) {
+                currentPage = totalPages;
+            } else if (currentPage < 1) {
+                currentPage = 1;
+            }
+            
+            // Calculate pagination slice
+            const startIndex = (currentPage - 1) * pageSize;
+            const endIndex = Math.min(startIndex + pageSize, totalRows);
+            const pageData = sortedData.slice(startIndex, endIndex);
+            
+            // Update pagination UI
+            updatePaginationUI();
+            
+            // Populate table with current page data
+            const tableBody = document.getElementById('connectionsTableBody');
+            tableBody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #999;">Loading hostnames...</td></tr>';
             tableBody.innerHTML = '';
             
             // Process each connection with hostname resolution
-            for (const connection of sortedData) {
+            for (const connection of pageData) {
                 const row = document.createElement('tr');
                 
                 // Use hostname from server data if available, otherwise resolve
@@ -1098,7 +1335,7 @@
         // Legacy function name for compatibility
         async function loadConnections() {
             await loadConnectionData();
-            await loadDatabaseStats();
+            await loadHeaderStats();
         }
         
         // Refresh data
@@ -1127,22 +1364,22 @@
             }
         }
         
-        // Load database statistics
-        async function loadDatabaseStats() {
+        // Load database statistics for header
+        async function loadHeaderStats() {
             try {
                 const response = await fetch('/api/stats');
                 const stats = await response.json();
                 
                 // Update database size
-                const sizeElement = document.querySelector('#dbSize .db-value');
+                const dbSizeElement = document.getElementById('headerDbSize');
                 if (stats.database && stats.database.size_mb) {
-                    sizeElement.textContent = `${Math.round(stats.database.size_mb)}MB`;
+                    dbSizeElement.textContent = `${Math.round(stats.database.size_mb)}MB`;
                 } else {
-                    sizeElement.textContent = 'Unknown';
+                    dbSizeElement.textContent = 'Unknown';
                 }
                 
                 // Update oldest record date
-                const oldestElement = document.querySelector('#oldestRecord .db-value');
+                const oldestElement = document.getElementById('headerOldestRecord');
                 if (stats.database && stats.database.oldest_record) {
                     const oldestDate = new Date(stats.database.oldest_record);
                     const now = new Date();
@@ -1159,10 +1396,29 @@
                     oldestElement.textContent = 'Unknown';
                 }
                 
+                // Update total connections
+                const totalConnectionsElement = document.getElementById('headerTotalConnections');
+                if (stats.database && stats.database.total_connections) {
+                    const count = stats.database.total_connections;
+                    totalConnectionsElement.textContent = count.toLocaleString();
+                } else {
+                    totalConnectionsElement.textContent = 'Unknown';
+                }
+                
+                // Update unique IPs
+                const uniqueIPsElement = document.getElementById('headerUniqueIPs');
+                if (stats.database && stats.database.unique_ips) {
+                    uniqueIPsElement.textContent = stats.database.unique_ips.toLocaleString();
+                } else {
+                    uniqueIPsElement.textContent = 'Unknown';
+                }
+                
             } catch (error) {
-                console.error('Error loading database stats:', error);
-                document.querySelector('#dbSize .db-value').textContent = 'Error';
-                document.querySelector('#oldestRecord .db-value').textContent = 'Error';
+                console.error('Error loading header stats:', error);
+                document.getElementById('headerDbSize').textContent = 'Error';
+                document.getElementById('headerOldestRecord').textContent = 'Error';
+                document.getElementById('headerTotalConnections').textContent = 'Error';
+                document.getElementById('headerUniqueIPs').textContent = 'Error';
             }
         }
         
@@ -1366,6 +1622,27 @@
             
             // Set up CSV download button
             document.getElementById('downloadCsvBtn').addEventListener('click', downloadConnectionsCSV);
+            
+            // Set up pagination controls
+            document.getElementById('pageSizeSelect').addEventListener('change', (e) => {
+                pageSize = parseInt(e.target.value);
+                currentPage = 1; // Reset to first page
+                if (currentView === 'list') {
+                    populateConnectionsTable();
+                }
+            });
+            
+            document.getElementById('firstPageBtn').addEventListener('click', () => goToPage(1));
+            document.getElementById('prevPageBtn').addEventListener('click', () => goToPage(currentPage - 1));
+            document.getElementById('nextPageBtn').addEventListener('click', () => goToPage(currentPage + 1));
+            document.getElementById('lastPageBtn').addEventListener('click', () => goToPage(totalPages));
+            
+            document.getElementById('pageJumpInput').addEventListener('change', (e) => {
+                const page = parseInt(e.target.value);
+                if (!isNaN(page)) {
+                    goToPage(page);
+                }
+            });
             
             // Set up sort buttons
             document.querySelectorAll('.sort-btn').forEach(btn => {

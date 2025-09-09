@@ -1,5 +1,8 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const execAsync = promisify(exec);
 
 class ConnectionsDatabase {
     constructor(dbPath = '../data/connections.db', options = {}) {
@@ -14,6 +17,12 @@ class ConnectionsDatabase {
             cleanupBatchSize: options.cleanupBatchSize || 10000, // Records to delete per batch
             enableSizeLimit: options.enableSizeLimit !== false, // Enable by default
             enableTimeLimit: options.enableTimeLimit !== false  // Enable by default
+        };
+        
+        // Email notification configuration
+        this.emailConfig = {
+            enabled: options.enableEmailNotifications !== false, // Enable by default
+            recipient: options.emailRecipient || 'admin@example.com'
         };
     }
 
@@ -490,6 +499,76 @@ class ConnectionsDatabase {
         });
     }
 
+    // Send email notification about database cleanup using system mail command
+    async sendCleanupNotification(cleanupResults) {
+        if (!this.emailConfig.enabled) {
+            console.log('Email notifications disabled');
+            return;
+        }
+
+        const totalDeleted = cleanupResults.aged + cleanupResults.sized + cleanupResults.geolocations;
+        
+        // Only send email if significant cleanup occurred
+        if (totalDeleted === 0) {
+            return;
+        }
+
+        try {
+            const currentTime = new Date().toLocaleString();
+            const sizeBefore = cleanupResults.sizeBefore?.toFixed(2) || 'N/A';
+            const sizeAfter = cleanupResults.sizeAfter?.toFixed(2) || 'N/A';
+            const spaceSaved = cleanupResults.spaceSaved?.toFixed(2) || 'N/A';
+
+            let cleanupReasons = [];
+            if (cleanupResults.aged > 0) {
+                cleanupReasons.push(`- Age-based cleanup: ${cleanupResults.aged} records older than ${this.retentionConfig.maxAgeDays} days`);
+            }
+            if (cleanupResults.sized > 0) {
+                cleanupReasons.push(`- Size-based cleanup: ${cleanupResults.sized} oldest records to maintain ${this.retentionConfig.maxSizeMB}MB limit`);
+            }
+            if (cleanupResults.geolocations > 0) {
+                cleanupReasons.push(`- Orphaned geolocation cleanup: ${cleanupResults.geolocations} unused entries`);
+            }
+
+            const emailBody = `Firewalla Monitor Database Cleanup Report
+
+Cleanup completed: ${currentTime}
+
+Summary:
+- Total records deleted: ${totalDeleted.toLocaleString()}
+- Database size before: ${sizeBefore} MB  
+- Database size after: ${sizeAfter} MB
+- Space reclaimed: ${spaceSaved} MB
+
+Cleanup Details:
+${cleanupReasons.join('\n')}
+
+Configuration:
+- Max database size: ${this.retentionConfig.maxSizeMB} MB
+- Max data age: ${this.retentionConfig.maxAgeDays} days
+- Cleanup batch size: ${this.retentionConfig.cleanupBatchSize} records
+
+This is an automated message from the Firewalla IP Monitor system.`;
+
+            const subject = `Firewalla Monitor Database Cleanup - ${totalDeleted.toLocaleString()} records processed`;
+            
+            // Use system mail command to send the email
+            const mailCommand = `echo "${emailBody}" | mail -s "${subject}" ${this.emailConfig.recipient}`;
+            
+            const { stdout, stderr } = await execAsync(mailCommand);
+            
+            if (stderr && stderr.trim()) {
+                console.warn(`Mail command stderr: ${stderr}`);
+            }
+            
+            console.log(`Cleanup notification email sent to ${this.emailConfig.recipient}`);
+
+        } catch (error) {
+            console.error('Failed to send cleanup notification email:', error.message);
+            // Don't throw the error - email failure shouldn't stop the cleanup process
+        }
+    }
+
     // Run all retention policies (main method to call)
     async runRetentionPolicies() {
         if (!this.isInitialized) {
@@ -519,7 +598,7 @@ class ConnectionsDatabase {
                 console.log(`Retention policies completed: ${spaceSaved.toFixed(2)}MB space reclaimed`);
             }
             
-            return {
+            const cleanupResults = {
                 aged: agedCleaned,
                 sized: sizeCleaned,
                 geolocations: geoCleaned,
@@ -527,6 +606,11 @@ class ConnectionsDatabase {
                 sizeAfter: sizeAfter,
                 spaceSaved: spaceSaved
             };
+            
+            // Send email notification if cleanup occurred
+            await this.sendCleanupNotification(cleanupResults);
+            
+            return cleanupResults;
             
         } catch (error) {
             console.error('Error running retention policies:', error.message);
