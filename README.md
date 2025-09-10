@@ -22,6 +22,7 @@ A comprehensive monitoring system that visualizes all external IP addresses conn
 - **Server-side DNS Resolution**: Resolves hostnames without CORS limitations
 - **Automatic Updates**: Collects fresh data every 2 minutes with database storage
 - **Performance Optimized**: Sub-second query responses for historical data (6x faster than file-based)
+- **Real-time Threat Intelligence Status**: Live header display showing scanned vs unscanned IP counts with tiered priority system
 
 ## Architecture
 
@@ -146,6 +147,36 @@ If you prefer manual setup:
    ```
 
 ## Usage
+
+### Threat Intelligence Status
+
+The web interface displays a real-time threat intelligence status indicator in the header:
+
+```
+🔍 Threat Intel
+45 Scanned | 1,634 Not Scanned
+1,143 Unknown • 490 Cloud • 3% Complete of 1,679
+```
+
+**Status Components:**
+- **Scanned**: IPs with current threat intelligence data (green)
+- **Not Scanned**: IPs waiting for threat analysis (red)  
+- **Unknown**: Suspicious/unknown IP ranges (Priority 1 - scanned first)
+- **Cloud**: Major cloud providers (Priority 2 - scanned after unknowns)
+- **Completion**: Overall scanning progress percentage
+
+**Tiered Scanning System:**
+- **Priority 1 (7-day cache)**: Unknown/suspicious IPs get scanned first
+- **Priority 2 (30-day cache)**: Cloud providers (AWS, Google, Microsoft, Apple) scanned when unknowns queue is empty
+- **Auto-refresh**: Status updates every 30 seconds
+- **Recently Updated**: Shows (+X new) when IPs are scanned since last refresh
+
+**Hover for Details:**
+The status indicator includes a comprehensive tooltip showing:
+- Total external IPs discovered
+- Breakdown by priority level  
+- Exact counts and percentages
+- Recently updated IP counts
 
 ### Starting the Monitor
 
