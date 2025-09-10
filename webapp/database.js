@@ -1,186 +1,101 @@
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
+const { Pool } = require('pg');
 const { exec } = require('child_process');
 const { promisify } = require('util');
 const execAsync = promisify(exec);
 
 class ConnectionsDatabase {
-    constructor(dbPath = '../data/connections.db', options = {}) {
-        this.dbPath = path.resolve(__dirname, dbPath);
-        this.db = null;
+    constructor(options = {}) {
+        // PostgreSQL connection configuration
+        this.pool = new Pool({
+            user: options.user || 'firewalla_user',
+            host: options.host || 'localhost',
+            database: options.database || 'firewalla_monitor',
+            password: options.password || 'firewalla123',
+            port: options.port || 5432,
+            max: 20, // Maximum number of clients in the pool
+            idleTimeoutMillis: 30000,
+            connectionTimeoutMillis: 2000,
+        });
+        
         this.isInitialized = false;
         
         // Retention policies configuration
         this.retentionConfig = {
-            maxSizeMB: options.maxSizeMB || 1000, // Default 1GB max database size
-            maxAgeDays: options.maxAgeDays || 30, // Default 30 days retention
-            cleanupBatchSize: options.cleanupBatchSize || 10000, // Records to delete per batch
-            enableSizeLimit: options.enableSizeLimit !== false, // Enable by default
-            enableTimeLimit: options.enableTimeLimit !== false  // Enable by default
+            maxSizeMB: options.maxSizeMB || 3000, // 3GB max database size
+            maxAgeDays: options.maxAgeDays || 7, // 7 days retention (reduced from 30)
+            cleanupBatchSize: options.cleanupBatchSize || 50000, // Records to delete per batch
+            enableSizeLimit: options.enableSizeLimit !== false,
+            enableTimeLimit: options.enableTimeLimit !== false
         };
 
         // Tracking for data reduction strategies
-        this.recentListeningPorts = new Map(); // Track recent listening ports
-        this.highVolumeIPs = new Set(['0.0.0.0', '8.8.8.8', '3.12.68.8', '15.197.187.26', '3.33.190.236']); // Known high-volume IPs
+        this.recentListeningPorts = new Map();
+        this.highVolumeIPs = new Set(['0.0.0.0', '8.8.8.8', '3.12.68.8', '15.197.187.26', '3.33.190.236']);
         this.listeningPortCleanupInterval = setInterval(() => {
             this.recentListeningPorts.clear();
-        }, 3600000); // Clear every hour
+        }, 3600000);
         
         // Email notification configuration
         this.emailConfig = {
-            enabled: options.enableEmailNotifications !== false, // Enable by default
+            enabled: options.enableEmailNotifications !== false,
             recipient: options.emailRecipient || 'admin@example.com'
         };
+        
+        // Handle pool errors
+        this.pool.on('error', (err) => {
+            console.error('PostgreSQL pool error:', err);
+        });
     }
 
-    // Initialize database connection and create tables
+    // Initialize database connection
     async init() {
-        return new Promise((resolve, reject) => {
-            this.db = new sqlite3.Database(this.dbPath, (err) => {
-                if (err) {
-                    console.error('Error opening database:', err.message);
-                    reject(err);
-                } else {
-                    console.log(`Connected to SQLite database at ${this.dbPath}`);
-                    this.createTables().then(() => {
-                        this.isInitialized = true;
-                        resolve();
-                    }).catch(reject);
-                }
-            });
-        });
+        try {
+            // Test connection
+            const client = await this.pool.connect();
+            console.log(`Connected to PostgreSQL database`);
+            client.release();
+            this.isInitialized = true;
+        } catch (err) {
+            console.error('Error connecting to PostgreSQL:', err.message);
+            throw err;
+        }
     }
 
-    // Create database tables
-    async createTables() {
-        const createConnectionsTable = `
-            CREATE TABLE IF NOT EXISTS connections (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ip TEXT NOT NULL,
-                timestamp DATETIME NOT NULL,
-                direction TEXT NOT NULL,
-                connection_type TEXT,
-                internal_ip TEXT,
-                internal_port INTEGER,
-                external_port INTEGER,
-                state TEXT,
-                orig_packets INTEGER DEFAULT 0,
-                orig_bytes INTEGER DEFAULT 0,
-                reply_packets INTEGER DEFAULT 0,
-                reply_bytes INTEGER DEFAULT 0,
-                details TEXT,
-                source_file TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(ip, timestamp, direction, internal_ip, external_port)
-            )
-        `;
-
-        const createGeolocationsTable = `
-            CREATE TABLE IF NOT EXISTS geolocations (
-                ip TEXT PRIMARY KEY,
-                country TEXT,
-                country_code TEXT,
-                region TEXT,
-                city TEXT,
-                latitude REAL,
-                longitude REAL,
-                timezone TEXT,
-                isp TEXT,
-                org TEXT,
-                asn TEXT,
-                hostname TEXT,
-                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        `;
-
-        const createIndexes = [
-            'CREATE INDEX IF NOT EXISTS idx_connections_ip ON connections(ip)',
-            'CREATE INDEX IF NOT EXISTS idx_connections_timestamp ON connections(timestamp)', 
-            'CREATE INDEX IF NOT EXISTS idx_connections_ip_timestamp ON connections(ip, timestamp)',
-            'CREATE INDEX IF NOT EXISTS idx_connections_direction ON connections(direction)',
-            'CREATE INDEX IF NOT EXISTS idx_connections_type ON connections(connection_type)'
-        ];
-
-        return new Promise((resolve, reject) => {
-            this.db.serialize(() => {
-                this.db.run(createConnectionsTable);
-                this.db.run(createGeolocationsTable);
-                
-                this.db.run('BEGIN');
-                
-                createIndexes.forEach(indexSQL => {
-                    this.db.run(indexSQL);
-                });
-                
-                this.db.run('COMMIT', (err) => {
-                    if (err) {
-                        reject(err);
-                    } else {
-                        console.log('Database tables and indexes created successfully');
-                        resolve();
-                    }
-                });
-            });
-        });
+    // Close database connections
+    async close() {
+        if (this.listeningPortCleanupInterval) {
+            clearInterval(this.listeningPortCleanupInterval);
+        }
+        await this.pool.end();
     }
 
-    // Insert connection record
-    async insertConnection(connectionData) {
-        const sql = `
-            INSERT OR IGNORE INTO connections 
-            (ip, timestamp, direction, connection_type, internal_ip, internal_port, 
-             external_port, state, orig_packets, orig_bytes, reply_packets, reply_bytes, details, source_file)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `;
-
-        return new Promise((resolve, reject) => {
-            this.db.run(sql, [
-                connectionData.ip,
-                connectionData.timestamp,
-                connectionData.direction || 'unknown',
-                connectionData.type || connectionData.connection_type,
-                connectionData.internal_ip,
-                connectionData.internal_port,
-                connectionData.external_port,
-                connectionData.state,
-                connectionData.orig_packets || 0,
-                connectionData.orig_bytes || 0,
-                connectionData.reply_packets || 0,
-                connectionData.reply_bytes || 0,
-                connectionData.details || '',
-                connectionData.source_file || ''
-            ], function(err) {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve(this.changes);
-                }
-            });
-        });
-    }
-
-    // Batch insert connections (much faster)
-    async insertConnectionsBatch(connections) {
-        return new Promise((resolve, reject) => {
-            const sql = `
-                INSERT OR IGNORE INTO connections 
-                (ip, timestamp, direction, connection_type, internal_ip, internal_port, 
-                 external_port, state, orig_packets, orig_bytes, reply_packets, reply_bytes, details, source_file)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    // Insert connections into database
+    async insertConnections(connections) {
+        if (!connections || connections.length === 0) return 0;
+        
+        const client = await this.pool.connect();
+        let insertCount = 0;
+        
+        try {
+            await client.query('BEGIN');
+            
+            const insertQuery = `
+                INSERT INTO connections (
+                    ip, timestamp, direction, connection_type, internal_ip, 
+                    internal_port, external_port, state, orig_packets, orig_bytes,
+                    reply_packets, reply_bytes, details, source_file
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                ON CONFLICT (ip, timestamp, direction, internal_ip, external_port) 
+                DO NOTHING
             `;
-
-            this.db.serialize(() => {
-                let insertCount = 0;
-                this.db.run('BEGIN TRANSACTION');
-                
-                const stmt = this.db.prepare(sql);
-                
-                connections.forEach(conn => {
-                    stmt.run([
+            
+            for (const conn of connections) {
+                try {
+                    const result = await client.query(insertQuery, [
                         conn.ip,
                         conn.timestamp,
-                        conn.direction || 'unknown',
-                        conn.type || conn.connection_type,
+                        conn.direction,
+                        conn.connection_type,
                         conn.internal_ip,
                         conn.internal_port,
                         conn.external_port,
@@ -189,639 +104,779 @@ class ConnectionsDatabase {
                         conn.orig_bytes || 0,
                         conn.reply_packets || 0,
                         conn.reply_bytes || 0,
-                        conn.details || '',
-                        conn.source_file || ''
-                    ], function(err) {
-                        if (!err && this.changes > 0) {
-                            insertCount++;
-                        }
-                    });
-                });
-                
-                stmt.finalize();
-                this.db.run('COMMIT', (err) => {
-                    if (err) {
-                        reject(err);
-                    } else {
-                        console.log(`Batch inserted ${insertCount} connection records`);
-                        resolve(insertCount);
+                        conn.details,
+                        conn.source_file
+                    ]);
+                    insertCount++;
+                } catch (err) {
+                    if (!err.message.includes('duplicate key')) {
+                        console.error('Error inserting connection:', err.message);
                     }
-                });
-            });
-        });
-    }
-
-    // Aggregated batch insert with data reduction strategies
-    async insertConnectionsAggregated(connections) {
-        const filteredConnections = this.applyDataReduction(connections);
-        return this.insertConnectionsBatch(filteredConnections);
-    }
-
-    // Apply data reduction strategies (memory-efficient)
-    applyDataReduction(connections) {
-        const skipStates = ['TIME_WAIT', 'CLOSE', 'LAST_ACK', 'FIN_WAIT', 'SYN_RECV'];
-        const result = [];
-        const aggregated = new Map();
-        const currentTime = new Date();
-        let skipped = 0;
-
-        // Process connections in smaller batches to reduce memory usage
-        const batchSize = 10000;
-        for (let i = 0; i < connections.length; i += batchSize) {
-            const batch = connections.slice(i, i + batchSize);
-            
-            for (const conn of batch) {
-                // Strategy 1: Skip transient states (immediate memory saving)
-                if (skipStates.includes(conn.state)) {
-                    skipped++;
-                    continue;
-                }
-
-                // Strategy 2: Deduplicate listening ports (keep one per hour)
-                if (conn.connection_type === 'listening_port' || conn.type === 'listening_port') {
-                    const hourKey = `${conn.ip}-${currentTime.getHours()}`;
-                    if (this.recentListeningPorts.has(hourKey)) {
-                        skipped++;
-                        continue; // Skip this listening port, already logged this hour
-                    }
-                    this.recentListeningPorts.set(hourKey, true);
-                }
-
-                // Strategy 3: Aggregate high-volume IPs by 5-minute buckets
-                if (this.highVolumeIPs.has(conn.ip)) {
-                    const bucket = this.get5MinuteBucket(conn.timestamp);
-                    const key = `${conn.ip}-${bucket}-${conn.direction}-${conn.connection_type || conn.type}`;
-                    
-                    if (aggregated.has(key)) {
-                        // Update existing aggregated entry
-                        const existing = aggregated.get(key);
-                        existing.orig_packets = (existing.orig_packets || 0) + (conn.orig_packets || 0);
-                        existing.orig_bytes = (existing.orig_bytes || 0) + (conn.orig_bytes || 0);
-                        existing.reply_packets = (existing.reply_packets || 0) + (conn.reply_packets || 0);
-                        existing.reply_bytes = (existing.reply_bytes || 0) + (conn.reply_bytes || 0);
-                        existing.connection_count = (existing.connection_count || 1) + 1;
-                        existing.details = `Aggregated ${existing.connection_count} connections`;
-                    } else {
-                        // Create new aggregated entry
-                        aggregated.set(key, {
-                            ...conn,
-                            timestamp: bucket, // Use bucket timestamp
-                            details: `Aggregated connection (count: 1)`,
-                            connection_count: 1
-                        });
-                    }
-                } else {
-                    // Keep individual records for low-volume IPs
-                    result.push(conn);
                 }
             }
+            
+            await client.query('COMMIT');
+            
+        } catch (err) {
+            await client.query('ROLLBACK');
+            console.error('Transaction failed:', err.message);
+            throw err;
+        } finally {
+            client.release();
         }
-
-        // Add aggregated entries to result
-        result.push(...Array.from(aggregated.values()));
         
-        console.log(`Data reduction: ${connections.length} -> ${result.length} connections (${Math.round((1 - result.length/connections.length) * 100)}% reduction, ${skipped} skipped)`);
-        
-        // Clear aggregated map to free memory
-        aggregated.clear();
-        
-        return result;
+        return insertCount;
     }
 
-    // Helper function to create 5-minute time buckets
-    get5MinuteBucket(timestamp) {
-        const date = new Date(timestamp);
-        const minutes = Math.floor(date.getMinutes() / 5) * 5;
-        date.setMinutes(minutes, 0, 0); // Set to start of 5-minute bucket
-        return date.toISOString();
+    // Alias for insertConnections (for backward compatibility)
+    async insertConnectionsAggregated(connections) {
+        return await this.insertConnections(connections);
     }
 
-    // Get historical connections with filtering
-    async getHistoricalConnections(filters = {}) {
-        let sql = `
-            SELECT c.*, g.country, g.country_code, g.region, g.city, g.latitude, g.longitude,
-                   g.timezone, g.isp, g.org, g.asn, g.hostname
-            FROM connections c
-            LEFT JOIN geolocations g ON c.ip = g.ip
-            WHERE 1=1
+    // Get recent connections for API
+    async getRecentConnections(options = {}) {
+        const limit = options.limit || 5000;
+        const offset = options.offset || 0;
+        
+        const query = `
+            SELECT ip, timestamp, direction, connection_type, internal_ip,
+                   internal_port, external_port, state, orig_packets, orig_bytes,
+                   reply_packets, reply_bytes, details
+            FROM connections
+            ORDER BY timestamp DESC
+            LIMIT $1 OFFSET $2
         `;
         
-        const params = [];
-        
-        if (filters.startDate) {
-            sql += ' AND datetime(c.timestamp) >= datetime(?)';
-            params.push(filters.startDate);
+        try {
+            const result = await this.pool.query(query, [limit, offset]);
+            return result.rows;
+        } catch (err) {
+            console.error('Error getting recent connections:', err.message);
+            return [];
         }
+    }
+
+    // Get historical connections with filters (includes geolocation data)
+    async getHistoricalConnections(options = {}) {
+        const limit = options.limit || 5000;
+        const orderBy = options.orderBy || 'timestamp DESC';
+        const filters = options.filters || {};
         
-        if (filters.endDate) {
-            sql += ' AND datetime(c.timestamp) <= datetime(?)';
-            params.push(filters.endDate);
-        }
+        // Join with geolocations table to include lat/lng for map display
+        let query = `
+            SELECT c.*, g.country, g.country_code, g.region, g.city, 
+                   g.latitude, g.longitude, g.timezone, g.isp, g.org, g.asn, g.hostname
+            FROM connections c
+            LEFT JOIN geolocations g ON c.ip = g.ip
+        `;
+        const queryParams = [];
+        const whereClauses = [];
         
-        if (filters.direction && filters.direction !== 'both') {
-            sql += ' AND c.direction = ?';
-            params.push(filters.direction);
+        // Always exclude invalid/internal IP addresses
+        whereClauses.push(`c.ip != '0.0.0.0'`);
+        whereClauses.push(`c.ip IS NOT NULL`);
+        
+        // Add filters
+        if (filters.direction) {
+            whereClauses.push(`c.direction = $${queryParams.length + 1}`);
+            queryParams.push(filters.direction);
         }
         
         if (filters.ip) {
-            sql += ' AND c.ip = ?';
-            params.push(filters.ip);
+            whereClauses.push(`c.ip = $${queryParams.length + 1}`);
+            queryParams.push(filters.ip);
         }
-        
-        sql += ' ORDER BY c.timestamp DESC';
-        
-        if (filters.limit) {
-            sql += ' LIMIT ?';
-            params.push(parseInt(filters.limit));
-        }
-
-        return new Promise((resolve, reject) => {
-            this.db.all(sql, params, (err, rows) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve(rows);
-                }
-            });
-        });
-    }
-
-    // Get aggregated connection data (for current API compatibility)
-    async getAggregatedConnections(filters = {}) {
-        let sql = `
-            SELECT c.ip,
-                   COUNT(*) as connection_count,
-                   SUM(CASE WHEN c.direction = 'inbound' THEN 1 ELSE 0 END) as inbound_count,
-                   SUM(CASE WHEN c.direction = 'outbound' THEN 1 ELSE 0 END) as outbound_count,
-                   MAX(c.timestamp) as last_seen,
-                   GROUP_CONCAT(DISTINCT c.connection_type) as connection_types,
-                   GROUP_CONCAT(DISTINCT c.direction) as directions,
-                   g.country, g.country_code, g.region, g.city, g.latitude, g.longitude,
-                   g.timezone, g.isp, g.org, g.asn, g.hostname
-            FROM connections c
-            LEFT JOIN geolocations g ON c.ip = g.ip
-            WHERE 1=1
-        `;
-        
-        const params = [];
         
         if (filters.startDate) {
-            sql += ' AND datetime(c.timestamp) >= datetime(?)';
-            params.push(filters.startDate);
+            whereClauses.push(`c.timestamp >= $${queryParams.length + 1}`);
+            queryParams.push(filters.startDate);
         }
         
         if (filters.endDate) {
-            sql += ' AND datetime(c.timestamp) <= datetime(?)';
-            params.push(filters.endDate);
+            whereClauses.push(`c.timestamp <= $${queryParams.length + 1}`);
+            queryParams.push(filters.endDate);
         }
         
-        if (filters.direction && filters.direction !== 'both') {
-            sql += ' AND c.direction = ?';
-            params.push(filters.direction);
+        if (whereClauses.length > 0) {
+            query += ' WHERE ' + whereClauses.join(' AND ');
         }
         
-        sql += ' GROUP BY c.ip';
-        sql += ' ORDER BY connection_count DESC';
+        // Replace 'timestamp' with 'c.timestamp' in ORDER BY
+        const orderByFixed = orderBy.replace('timestamp', 'c.timestamp');
+        query += ` ORDER BY ${orderByFixed} LIMIT $${queryParams.length + 1}`;
+        queryParams.push(limit);
         
-        if (filters.limit) {
-            sql += ' LIMIT ?';
-            params.push(parseInt(filters.limit));
+        try {
+            const result = await this.pool.query(query, queryParams);
+            return result.rows;
+        } catch (err) {
+            console.error('Error getting historical connections:', err.message);
+            return [];
         }
-
-        return new Promise((resolve, reject) => {
-            this.db.all(sql, params, (err, rows) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    // Transform to match current API format
-                    const connections = rows.map(row => ({
-                        ip: row.ip,
-                        connectionCount: row.connection_count,
-                        inboundCount: row.inbound_count,
-                        outboundCount: row.outbound_count,
-                        lastSeen: row.last_seen,
-                        connectionTypes: row.connection_types ? row.connection_types.split(',') : [],
-                        directions: row.directions ? row.directions.split(',') : [],
-                        country: row.country || 'Unknown',
-                        countryCode: row.country_code || 'XX',
-                        region: row.region || 'Unknown',
-                        city: row.city || 'Unknown',
-                        latitude: row.latitude || 0,
-                        longitude: row.longitude || 0,
-                        timezone: row.timezone || 'Unknown',
-                        isp: row.isp || 'Unknown',
-                        org: row.org || 'Unknown',
-                        asn: row.asn || 'Unknown',
-                        hostname: row.hostname || 'No hostname found'
-                    }));
-                    resolve(connections);
-                }
-            });
-        });
     }
 
-    // Insert or update geolocation data
-    async upsertGeolocation(ip, geoData) {
-        const sql = `
-            INSERT OR REPLACE INTO geolocations 
-            (ip, country, country_code, region, city, latitude, longitude, timezone, isp, org, asn, hostname, last_updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        `;
-
-        return new Promise((resolve, reject) => {
-            this.db.run(sql, [
-                ip,
-                geoData.country,
-                geoData.countryCode,
-                geoData.region,
-                geoData.city,
-                geoData.latitude,
-                geoData.longitude,
-                geoData.timezone,
-                geoData.isp,
-                geoData.org,
-                geoData.asn,
-                geoData.hostname || 'No hostname found'
-            ], function(err) {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve(this.changes);
-                }
-            });
-        });
-    }
-
-    // Get database statistics
+    // Get database statistics (optimized for PostgreSQL)
     async getStats() {
-        const queries = [
-            'SELECT COUNT(*) as total_connections FROM connections',
-            'SELECT COUNT(DISTINCT ip) as unique_ips FROM connections', 
-            'SELECT COUNT(*) as cached_geolocations FROM geolocations',
-            'SELECT MIN(timestamp) as oldest_record, MAX(timestamp) as newest_record FROM connections'
-        ];
+        const queries = {
+            total_connections: 'SELECT COUNT(*) as total_connections FROM connections',
+            unique_ips: 'SELECT COUNT(DISTINCT ip) as unique_ips FROM connections',
+            cached_geolocations: 'SELECT COUNT(*) as cached_geolocations FROM geolocations',
+            date_range: 'SELECT MIN(timestamp) as oldest_record, MAX(timestamp) as newest_record FROM connections'
+        };
 
         const results = {};
         
-        for (const query of queries) {
-            const result = await new Promise((resolve, reject) => {
-                this.db.get(query, (err, row) => {
-                    if (err) reject(err);
-                    else resolve(row);
-                });
+        try {
+            // Run queries with reasonable timeouts
+            const promises = Object.entries(queries).map(async ([key, query]) => {
+                try {
+                    const result = await this.pool.query(query);
+                    if (key === 'date_range') {
+                        results.oldest_record = result.rows[0]?.oldest_record;
+                        results.newest_record = result.rows[0]?.newest_record;
+                    } else {
+                        Object.assign(results, result.rows[0]);
+                    }
+                } catch (err) {
+                    console.error(`Error in stats query ${key}:`, err.message);
+                    if (key === 'date_range') {
+                        results.oldest_record = 'Error';
+                        results.newest_record = 'Error';
+                    } else {
+                        results[key.split(' as ')[1]] = 'Error';
+                    }
+                }
             });
-            Object.assign(results, result);
+            
+            await Promise.all(promises);
+            
+        } catch (error) {
+            console.error('Error getting database stats:', error.message);
+            return {
+                total_connections: 'Error',
+                unique_ips: 'Error',
+                cached_geolocations: 'Error',
+                oldest_record: 'Error',
+                newest_record: 'Error'
+            };
         }
         
         return results;
     }
 
-    // Get database file size in MB
+    // Get database size (PostgreSQL specific)
     async getDatabaseSizeMB() {
-        const fs = require('fs').promises;
         try {
-            const stats = await fs.stat(this.dbPath);
-            return Math.round(stats.size / (1024 * 1024) * 100) / 100; // Round to 2 decimal places
+            const query = `
+                SELECT pg_size_pretty(pg_database_size('firewalla_monitor')) as size_pretty,
+                       pg_database_size('firewalla_monitor') / (1024 * 1024) as size_mb
+            `;
+            const result = await this.pool.query(query);
+            return Math.round(result.rows[0]?.size_mb * 100) / 100;
         } catch (error) {
-            console.warn('Could not get database file size:', error.message);
+            console.warn('Could not get database size:', error.message);
             return 0;
         }
     }
 
-    // Clean up old records by age (time-based retention)
+    // Cleanup old records by age
     async cleanupByAge() {
         if (!this.retentionConfig.enableTimeLimit) return 0;
 
         const cutoffDate = new Date();
         cutoffDate.setDate(cutoffDate.getDate() - this.retentionConfig.maxAgeDays);
-        const cutoffISO = cutoffDate.toISOString();
         const maxAgeDays = this.retentionConfig.maxAgeDays;
 
-        const deleteSQL = `
-            DELETE FROM connections 
-            WHERE id IN (
-                SELECT id FROM connections 
-                WHERE timestamp < ?
-                ORDER BY timestamp ASC
-                LIMIT ?
-            )
-        `;
-
-        return new Promise((resolve, reject) => {
-            this.db.run(deleteSQL, [cutoffISO, this.retentionConfig.cleanupBatchSize], function(err) {
-                if (err) {
-                    reject(err);
-                } else {
-                    const deleted = this.changes;
-                    if (deleted > 0) {
-                        console.log(`Cleaned up ${deleted} records older than ${maxAgeDays} days`);
-                    }
-                    resolve(deleted);
-                }
-            });
-        });
+        try {
+            const result = await this.pool.query(
+                'DELETE FROM connections WHERE timestamp < $1',
+                [cutoffDate.toISOString()]
+            );
+            
+            const deletedRows = result.rowCount;
+            if (deletedRows > 0) {
+                console.log(`🧹 Cleaned up ${deletedRows} connections older than ${maxAgeDays} days`);
+            }
+            return deletedRows;
+        } catch (error) {
+            console.error('Error cleaning up by age:', error.message);
+            return 0;
+        }
     }
 
-    // Clean up oldest records to maintain size limit (size-based retention)
+    // Cleanup by database size
     async cleanupBySize() {
         if (!this.retentionConfig.enableSizeLimit) return 0;
 
-        const currentSizeMB = await this.getDatabaseSizeMB();
-        if (currentSizeMB <= this.retentionConfig.maxSizeMB) return 0;
-        
-        const maxSizeMB = this.retentionConfig.maxSizeMB;
-
-        const deleteSQL = `
-            DELETE FROM connections 
-            WHERE id IN (
-                SELECT id FROM connections 
-                ORDER BY timestamp ASC 
-                LIMIT ?
-            )
-        `;
-
-        return new Promise((resolve, reject) => {
-            this.db.run(deleteSQL, [this.retentionConfig.cleanupBatchSize], function(err) {
-                if (err) {
-                    reject(err);
-                } else {
-                    const deleted = this.changes;
-                    if (deleted > 0) {
-                        console.log(`Cleaned up ${deleted} oldest records to maintain size limit (${currentSizeMB}MB > ${maxSizeMB}MB)`);
-                    }
-                    resolve(deleted);
-                }
-            });
-        });
-    }
-
-    // Clean up orphaned geolocation entries (IPs no longer in connections table)
-    async cleanupOrphanedGeolocations() {
-        const deleteSQL = `
-            DELETE FROM geolocations 
-            WHERE ip NOT IN (SELECT DISTINCT ip FROM connections)
-        `;
-
-        return new Promise((resolve, reject) => {
-            this.db.run(deleteSQL, function(err) {
-                if (err) {
-                    reject(err);
-                } else {
-                    const deleted = this.changes;
-                    if (deleted > 0) {
-                        console.log(`Cleaned up ${deleted} orphaned geolocation entries`);
-                    }
-                    resolve(deleted);
-                }
-            });
-        });
-    }
-
-    // Vacuum database to reclaim space after deletions
-    async vacuumDatabase() {
-        return new Promise((resolve, reject) => {
-            this.db.run('VACUUM', (err) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    console.log('Database vacuumed to reclaim space');
-                    resolve();
-                }
-            });
-        });
-    }
-
-    // Send email notification about database cleanup using system mail command
-    async sendCleanupNotification(cleanupResults) {
-        if (!this.emailConfig.enabled) {
-            console.log('Email notifications disabled');
-            return;
-        }
-
-        const totalDeleted = cleanupResults.aged + cleanupResults.sized + cleanupResults.geolocations;
-        
-        // Only send email if significant cleanup occurred
-        if (totalDeleted === 0) {
-            return;
-        }
-
         try {
-            const currentTime = new Date().toLocaleString();
-            const sizeBefore = cleanupResults.sizeBefore?.toFixed(2) || 'N/A';
-            const sizeAfter = cleanupResults.sizeAfter?.toFixed(2) || 'N/A';
-            const spaceSaved = cleanupResults.spaceSaved?.toFixed(2) || 'N/A';
+            const sizeMB = await this.getDatabaseSizeMB();
+            if (sizeMB <= this.retentionConfig.maxSizeMB) return 0;
 
-            let cleanupReasons = [];
-            if (cleanupResults.aged > 0) {
-                cleanupReasons.push(`- Age-based cleanup: ${cleanupResults.aged} records older than ${this.retentionConfig.maxAgeDays} days`);
-            }
-            if (cleanupResults.sized > 0) {
-                cleanupReasons.push(`- Size-based cleanup: ${cleanupResults.sized} oldest records to maintain ${this.retentionConfig.maxSizeMB}MB limit`);
-            }
-            if (cleanupResults.geolocations > 0) {
-                cleanupReasons.push(`- Orphaned geolocation cleanup: ${cleanupResults.geolocations} unused entries`);
-            }
-
-            const emailBody = `Firewalla Monitor Database Cleanup Report
-
-Cleanup completed: ${currentTime}
-
-Summary:
-- Total records deleted: ${totalDeleted.toLocaleString()}
-- Database size before: ${sizeBefore} MB  
-- Database size after: ${sizeAfter} MB
-- Space reclaimed: ${spaceSaved} MB
-
-Cleanup Details:
-${cleanupReasons.join('\n')}
-
-Configuration:
-- Max database size: ${this.retentionConfig.maxSizeMB} MB
-- Max data age: ${this.retentionConfig.maxAgeDays} days
-- Cleanup batch size: ${this.retentionConfig.cleanupBatchSize} records
-
-This is an automated message from the Firewalla IP Monitor system.`;
-
-            const subject = `Firewalla Monitor Database Cleanup - ${totalDeleted.toLocaleString()} records processed`;
+            // Delete oldest records in batches until under size limit
+            const batchSize = this.retentionConfig.cleanupBatchSize;
+            let totalDeleted = 0;
             
-            // Use system mail command to send the email
-            const mailCommand = `echo "${emailBody}" | mail -s "${subject}" ${this.emailConfig.recipient}`;
-            
-            const { stdout, stderr } = await execAsync(mailCommand);
-            
-            if (stderr && stderr.trim()) {
-                console.warn(`Mail command stderr: ${stderr}`);
+            while (await this.getDatabaseSizeMB() > this.retentionConfig.maxSizeMB) {
+                const result = await this.pool.query(`
+                    DELETE FROM connections 
+                    WHERE id IN (
+                        SELECT id FROM connections 
+                        ORDER BY timestamp ASC 
+                        LIMIT $1
+                    )
+                `, [batchSize]);
+                
+                const deleted = result.rowCount;
+                totalDeleted += deleted;
+                
+                if (deleted < batchSize) break; // No more records to delete
             }
-            
-            console.log(`Cleanup notification email sent to ${this.emailConfig.recipient}`);
 
+            if (totalDeleted > 0) {
+                console.log(`🧹 Cleaned up ${totalDeleted} connections to maintain ${this.retentionConfig.maxSizeMB}MB size limit`);
+            }
+            return totalDeleted;
         } catch (error) {
-            console.error('Failed to send cleanup notification email:', error.message);
-            // Don't throw the error - email failure shouldn't stop the cleanup process
+            console.error('Error cleaning up by size:', error.message);
+            return 0;
         }
     }
 
-    // Run all retention policies (main method to call)
-    async runRetentionPolicies() {
-        if (!this.isInitialized) {
-            console.warn('Database not initialized, skipping retention policies');
-            return { aged: 0, sized: 0, geolocations: 0 };
-        }
-
-        console.log('Running database retention policies...');
-        
-        const sizeBefore = await this.getDatabaseSizeMB();
-        
+    // Geolocation methods
+    async insertGeolocation(ip, geoData) {
         try {
-            // Run cleanup operations
-            const agedCleaned = await this.cleanupByAge();
-            const sizeCleaned = await this.cleanupBySize();
-            const geoCleaned = await this.cleanupOrphanedGeolocations();
+            const query = `
+                INSERT INTO geolocations (
+                    ip, country, country_code, region, city, 
+                    latitude, longitude, timezone, isp, org, asn, hostname
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                ON CONFLICT (ip) DO UPDATE SET
+                    country = EXCLUDED.country,
+                    country_code = EXCLUDED.country_code,
+                    region = EXCLUDED.region,
+                    city = EXCLUDED.city,
+                    latitude = EXCLUDED.latitude,
+                    longitude = EXCLUDED.longitude,
+                    timezone = EXCLUDED.timezone,
+                    isp = EXCLUDED.isp,
+                    org = EXCLUDED.org,
+                    asn = EXCLUDED.asn,
+                    hostname = EXCLUDED.hostname,
+                    last_updated = NOW()
+            `;
             
-            // Vacuum if we deleted anything significant
-            if (agedCleaned + sizeCleaned + geoCleaned > 1000) {
-                await this.vacuumDatabase();
-            }
-            
-            const sizeAfter = await this.getDatabaseSizeMB();
-            const spaceSaved = sizeBefore - sizeAfter;
-            
-            if (spaceSaved > 0.1) {
-                console.log(`Retention policies completed: ${spaceSaved.toFixed(2)}MB space reclaimed`);
-            }
-            
-            const cleanupResults = {
-                aged: agedCleaned,
-                sized: sizeCleaned,
-                geolocations: geoCleaned,
-                sizeBefore: sizeBefore,
-                sizeAfter: sizeAfter,
-                spaceSaved: spaceSaved
-            };
-            
-            // Send email notification if cleanup occurred
-            await this.sendCleanupNotification(cleanupResults);
-            
-            return cleanupResults;
-            
+            await this.pool.query(query, [
+                ip, geoData.country, geoData.country_code, geoData.region,
+                geoData.city, geoData.latitude, geoData.longitude, geoData.timezone,
+                geoData.isp, geoData.org, geoData.asn, geoData.hostname
+            ]);
         } catch (error) {
-            console.error('Error running retention policies:', error.message);
-            throw error;
+            console.error('Error inserting geolocation:', error.message);
         }
     }
 
-    // Close database connection
-    close() {
-        if (this.db) {
-            this.db.close((err) => {
-                if (err) {
-                    console.error('Error closing database:', err.message);
-                } else {
-                    console.log('Database connection closed');
-                }
-            });
+    async getGeolocation(ip) {
+        try {
+            const result = await this.pool.query('SELECT * FROM geolocations WHERE ip = $1', [ip]);
+            return result.rows[0] || null;
+        } catch (error) {
+            console.error('Error getting geolocation:', error.message);
+            return null;
         }
     }
 
-    // Search connections with geolocation data
-    async searchConnections(searchTerm, filters = {}) {
-        if (!searchTerm || searchTerm.trim().length === 0) {
-            // If no search term, return aggregated connections with filters
-            return this.getAggregatedConnections(filters);
+    async getAllGeolocations() {
+        try {
+            const result = await this.pool.query('SELECT * FROM geolocations ORDER BY last_updated DESC');
+            return result.rows;
+        } catch (error) {
+            console.error('Error getting all geolocations:', error.message);
+            return [];
         }
+    }
 
-        const term = `%${searchTerm.toLowerCase()}%`;
+    // Alias for insertGeolocation (for backward compatibility)
+    async upsertGeolocation(ip, geoData) {
+        return await this.insertGeolocation(ip, geoData);
+    }
+
+    // Get aggregated connections for connection list view
+    async getAggregatedConnections(filters = {}) {
+        const limit = filters.limit || 1000;
+        const orderBy = 'c.timestamp DESC';
         
-        let sql = `
-            SELECT c.ip,
-                   COUNT(*) as connection_count,
-                   SUM(CASE WHEN c.direction = 'inbound' THEN 1 ELSE 0 END) as inbound_count,
-                   SUM(CASE WHEN c.direction = 'outbound' THEN 1 ELSE 0 END) as outbound_count,
-                   MAX(c.timestamp) as last_seen,
-                   GROUP_CONCAT(DISTINCT c.connection_type) as connection_types,
-                   GROUP_CONCAT(DISTINCT c.direction) as directions,
-                   g.country, g.country_code, g.region, g.city, g.latitude, g.longitude,
-                   g.timezone, g.isp, g.org, g.asn, g.hostname
-            FROM connections c
-            LEFT JOIN geolocations g ON c.ip = g.ip
-            WHERE 1=1
+        // Use optimized query with subquery to limit data first, then aggregate
+        let query = `
+            WITH recent_connections AS (
+                SELECT c.ip, c.direction, c.timestamp
+                FROM connections c
+                WHERE 1=1
         `;
         
-        const params = [];
+        const queryParams = [];
+        const whereClauses = [];
         
-        // Apply date filtering
+        // Always exclude invalid/internal IP addresses in subquery
+        whereClauses.push(`c.ip != '0.0.0.0'`);
+        whereClauses.push(`c.ip IS NOT NULL`);
+        
+        // Add time range filters to subquery for better performance
         if (filters.startDate) {
-            sql += ' AND datetime(c.timestamp) >= datetime(?)';
-            params.push(filters.startDate);
+            whereClauses.push(`c.timestamp >= $${queryParams.length + 1}`);
+            queryParams.push(filters.startDate);
         }
         
         if (filters.endDate) {
-            sql += ' AND datetime(c.timestamp) <= datetime(?)';
-            params.push(filters.endDate);
+            whereClauses.push(`c.timestamp <= $${queryParams.length + 1}`);
+            queryParams.push(filters.endDate);
         }
         
-        // Apply direction filtering
-        if (filters.direction && filters.direction !== 'both') {
-            sql += ' AND c.direction = ?';
-            params.push(filters.direction);
+        if (filters.direction) {
+            whereClauses.push(`c.direction = $${queryParams.length + 1}`);
+            queryParams.push(filters.direction);
         }
         
-        // Apply search term filtering - search across multiple fields
-        sql += ` AND (
-            LOWER(c.ip) LIKE ? OR 
-            LOWER(g.country) LIKE ? OR 
-            LOWER(g.region) LIKE ? OR 
-            LOWER(g.city) LIKE ? OR 
-            LOWER(g.isp) LIKE ? OR 
-            LOWER(g.org) LIKE ? OR 
-            LOWER(g.hostname) LIKE ?
-        )`;
-        
-        // Add the search term for each field
-        for (let i = 0; i < 7; i++) {
-            params.push(term);
+        // Add WHERE clauses to subquery
+        if (whereClauses.length > 0) {
+            query = query.replace('WHERE 1=1', 'WHERE ' + whereClauses.join(' AND '));
         }
         
-        sql += `
-            GROUP BY c.ip, g.country, g.country_code, g.region, g.city, 
-                     g.latitude, g.longitude, g.timezone, g.isp, g.org, g.asn, g.hostname
-            ORDER BY connection_count DESC
-            LIMIT ?
+        // Complete the CTE and main query - don't limit raw connections, let grouping happen first
+        query += `
+                ORDER BY c.timestamp DESC
+            )
+            SELECT 
+                rc.ip,
+                g.hostname,
+                g.country, g.region, g.city,
+                g.latitude, g.longitude, g.country_code,
+                g.isp, g.org, g.asn, g.timezone,
+                COUNT(*) as connection_count,
+                COUNT(CASE WHEN rc.direction = 'inbound' THEN 1 END) as inbound_count,
+                COUNT(CASE WHEN rc.direction = 'outbound' THEN 1 END) as outbound_count,
+                MAX(rc.timestamp) as last_seen,
+                STRING_AGG(DISTINCT rc.direction, ', ') as directions
+            FROM recent_connections rc
+            LEFT JOIN geolocations g ON rc.ip = g.ip
+            GROUP BY rc.ip, g.hostname, g.country, g.region, g.city, g.latitude, g.longitude, g.country_code, g.isp, g.org, g.asn, g.timezone
+            ORDER BY last_seen DESC 
+            LIMIT $${queryParams.length + 1}
         `;
         
-        params.push(filters.limit || 1000);
+        queryParams.push(limit);
         
-        return new Promise((resolve, reject) => {
-            this.db.all(sql, params, (err, rows) => {
-                if (err) {
-                    console.error('Database search error:', err.message);
-                    reject(err);
-                    return;
-                }
+        try {
+            const result = await this.pool.query(query, queryParams);
+            return result.rows.map(row => ({
+                ip: row.ip,
+                hostname: row.hostname || 'No hostname found',
+                location: `${row.city || ''}, ${row.region || ''}, ${row.country || ''}`.replace(/(^, |, $)/g, '').replace(/, ,/g, ', ').trim() || 'Unknown',
+                country: row.country || 'Unknown',
+                region: row.region || 'Unknown', 
+                city: row.city || 'Unknown',
+                latitude: parseFloat(row.latitude) || 0,
+                longitude: parseFloat(row.longitude) || 0,
+                countryCode: row.country_code || 'XX',
+                isp: row.isp || 'Unknown ISP',
+                org: row.org || 'Unknown Org',
+                asn: row.asn || 'Unknown ASN',
+                timezone: row.timezone,
+                connectionCount: parseInt(row.connection_count),
+                inboundCount: parseInt(row.inbound_count || 0),
+                outboundCount: parseInt(row.outbound_count || 0),
+                lastSeen: row.last_seen,
+                directions: row.directions
+            }));
+        } catch (err) {
+            console.error('Error getting aggregated connections:', err.message);
+            return [];
+        }
+    }
+
+    // Search connections with text search functionality
+    async searchConnections(searchTerm, filters = {}) {
+        const limit = filters.limit || 1000;
+        
+        // Base query similar to getAggregatedConnections but optimized for search
+        let query = `
+            SELECT 
+                c.ip,
+                g.hostname,
+                g.country, g.region, g.city,
+                g.latitude, g.longitude, g.country_code,
+                g.isp, g.org, g.asn, g.timezone,
+                COUNT(*) as connection_count,
+                COUNT(CASE WHEN c.direction = 'inbound' THEN 1 END) as inbound_count,
+                COUNT(CASE WHEN c.direction = 'outbound' THEN 1 END) as outbound_count,
+                MAX(c.timestamp) as last_seen,
+                STRING_AGG(DISTINCT c.direction, ', ') as directions
+            FROM connections c
+            LEFT JOIN geolocations g ON c.ip = g.ip
+        `;
+        
+        const queryParams = [];
+        const whereClauses = [];
+        
+        // Always exclude invalid/internal IP addresses
+        whereClauses.push(`c.ip != '0.0.0.0'`);
+        whereClauses.push(`c.ip IS NOT NULL`);
+        
+        // Add search term filtering if provided
+        if (searchTerm && searchTerm.trim().length > 0) {
+            const term = searchTerm.trim();
+            whereClauses.push(`(
+                c.ip::text ILIKE $${queryParams.length + 1} OR
+                g.hostname ILIKE $${queryParams.length + 1} OR
+                g.city ILIKE $${queryParams.length + 1} OR
+                g.country ILIKE $${queryParams.length + 1} OR
+                g.region ILIKE $${queryParams.length + 1} OR
+                g.isp ILIKE $${queryParams.length + 1} OR
+                g.org ILIKE $${queryParams.length + 1}
+            )`);
+            queryParams.push(`%${term}%`);
+        }
+        
+        // Add time range filters
+        if (filters.startDate) {
+            whereClauses.push(`c.timestamp >= $${queryParams.length + 1}`);
+            queryParams.push(filters.startDate);
+        }
+        
+        if (filters.endDate) {
+            whereClauses.push(`c.timestamp <= $${queryParams.length + 1}`);
+            queryParams.push(filters.endDate);
+        }
+        
+        if (filters.direction) {
+            whereClauses.push(`c.direction = $${queryParams.length + 1}`);
+            queryParams.push(filters.direction);
+        }
+        
+        if (whereClauses.length > 0) {
+            query += ' WHERE ' + whereClauses.join(' AND ');
+        }
+        
+        query += ` 
+            GROUP BY c.ip, g.hostname, g.country, g.region, g.city, g.latitude, g.longitude, g.country_code, g.isp, g.org, g.asn, g.timezone
+            ORDER BY last_seen DESC 
+            LIMIT $${queryParams.length + 1}
+        `;
+        queryParams.push(limit);
+        
+        try {
+            const result = await this.pool.query(query, queryParams);
+            return result.rows.map(row => ({
+                ip: row.ip,
+                hostname: row.hostname || 'No hostname found',
+                location: `${row.city || ''}, ${row.region || ''}, ${row.country || ''}`.replace(/(^, |, $)/g, '').replace(/, ,/g, ', ').trim() || 'Unknown',
+                country: row.country || 'Unknown',
+                region: row.region || 'Unknown', 
+                city: row.city || 'Unknown',
+                latitude: parseFloat(row.latitude) || 0,
+                longitude: parseFloat(row.longitude) || 0,
+                countryCode: row.country_code || 'XX',
+                isp: row.isp || 'Unknown ISP',
+                org: row.org || 'Unknown Org',
+                asn: row.asn || 'Unknown ASN',
+                timezone: row.timezone,
+                connectionCount: parseInt(row.connection_count),
+                inboundCount: parseInt(row.inbound_count || 0),
+                outboundCount: parseInt(row.outbound_count || 0),
+                lastSeen: row.last_seen,
+                directions: row.directions
+            }));
+        } catch (err) {
+            console.error('Error searching connections:', err.message);
+            return [];
+        }
+    }
+
+    // Threat intelligence methods
+    async insertThreatIntel(ip, threatData) {
+        try {
+            const query = `
+                INSERT INTO threat_intel (
+                    ip, virustotal_reputation, virustotal_total, virustotal_categories,
+                    abuseipdb_confidence, abuseipdb_usage_type, abuseipdb_total_reports,
+                    abuseipdb_categories, threat_level
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ON CONFLICT (ip) DO UPDATE SET
+                    virustotal_reputation = EXCLUDED.virustotal_reputation,
+                    virustotal_total = EXCLUDED.virustotal_total,
+                    virustotal_categories = EXCLUDED.virustotal_categories,
+                    abuseipdb_confidence = EXCLUDED.abuseipdb_confidence,
+                    abuseipdb_usage_type = EXCLUDED.abuseipdb_usage_type,
+                    abuseipdb_total_reports = EXCLUDED.abuseipdb_total_reports,
+                    abuseipdb_categories = EXCLUDED.abuseipdb_categories,
+                    threat_level = EXCLUDED.threat_level,
+                    last_checked = NOW()
+            `;
+            
+            await this.pool.query(query, [
+                ip,
+                threatData.virustotal_reputation,
+                threatData.virustotal_total,
+                JSON.stringify(threatData.virustotal_categories),
+                threatData.abuseipdb_confidence,
+                threatData.abuseipdb_usage_type,
+                threatData.abuseipdb_total_reports,
+                JSON.stringify(threatData.abuseipdb_categories),
+                threatData.threat_level
+            ]);
+        } catch (error) {
+            console.error('Error inserting threat intel:', error.message);
+        }
+    }
+
+    async getThreatIntel(ip) {
+        try {
+            const result = await this.pool.query('SELECT * FROM threat_intel WHERE ip = $1', [ip]);
+            return result.rows[0] || null;
+        } catch (error) {
+            console.error('Error getting threat intel:', error.message);
+            return null;
+        }
+    }
+
+    // Alias for insertThreatIntel (for backward compatibility)
+    async upsertThreatIntel(ip, threatData) {
+        return await this.insertThreatIntel(ip, threatData);
+    }
+
+    async getIPsNeedingThreatCheck(limit = 50) {
+        try {
+            // Tiered approach: Priority 1 (Unknown IPs - 7 days), Priority 2 (Cloud IPs - 30 days)
+            const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+            const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+            
+            // First priority: Unknown/suspicious IPs (non-cloud) - scan every 7 days
+            const unknownQuery = `
+                SELECT DISTINCT c.ip
+                FROM connections c
+                LEFT JOIN threat_intel t ON c.ip = t.ip
+                WHERE c.timestamp > $1 
+                AND (t.ip IS NULL OR t.last_checked < $2)
+                AND c.ip != '0.0.0.0'
+                AND c.ip::text NOT LIKE '192.168.%'
+                AND c.ip::text NOT LIKE '10.%'
+                AND c.ip::text NOT LIKE '172.16.%'
+                AND c.ip::text NOT LIKE '172.17.%'
+                AND c.ip::text NOT LIKE '172.18.%'
+                AND c.ip::text NOT LIKE '172.19.%'
+                AND c.ip::text NOT LIKE '172.2%'
+                AND c.ip::text NOT LIKE '172.30.%'
+                AND c.ip::text NOT LIKE '172.31.%'
+                AND c.ip::text NOT LIKE '3.%'         -- AWS
+                AND c.ip::text NOT LIKE '34.%'        -- Google Cloud
+                AND c.ip::text NOT LIKE '52.%'        -- Microsoft Azure
+                AND c.ip::text NOT LIKE '54.%'        -- AWS
+                AND c.ip::text NOT LIKE '8.8.8.%'     -- Google DNS
+                AND c.ip::text NOT LIKE '8.8.4.%'     -- Google DNS
+                AND c.ip::text NOT LIKE '216.239.%'   -- Google
+                AND c.ip::text NOT LIKE '17.%'        -- Apple
+                LIMIT $3
+            `;
+            
+            // Second priority: Cloud provider IPs - scan every 30 days (longer cache)
+            const cloudQuery = `
+                SELECT DISTINCT c.ip
+                FROM connections c
+                LEFT JOIN threat_intel t ON c.ip = t.ip
+                WHERE c.timestamp > $1 
+                AND (t.ip IS NULL OR t.last_checked < $2)
+                AND (c.ip::text LIKE '3.%' OR c.ip::text LIKE '34.%' OR c.ip::text LIKE '52.%' OR c.ip::text LIKE '54.%' 
+                     OR c.ip::text LIKE '8.8.8.%' OR c.ip::text LIKE '8.8.4.%' OR c.ip::text LIKE '216.239.%' OR c.ip::text LIKE '17.%')
+                LIMIT $3
+            `;
+            
+            // Try unknown IPs first
+            const unknownResult = await this.pool.query(unknownQuery, [sevenDaysAgo, sevenDaysAgo, limit]);
+            
+            if (unknownResult.rows.length > 0) {
+                console.log(`Found ${unknownResult.rows.length} unknown/suspicious IPs for threat intel scanning`);
+                return unknownResult.rows.map(row => row.ip);
+            }
+            
+            // If no unknown IPs, check cloud IPs
+            const cloudResult = await this.pool.query(cloudQuery, [sevenDaysAgo, thirtyDaysAgo, limit]);
+            
+            if (cloudResult.rows.length > 0) {
+                console.log(`Found ${cloudResult.rows.length} cloud provider IPs for threat intel scanning (30-day cache)`);
+                return cloudResult.rows.map(row => row.ip);
+            }
+            
+            console.log('No IPs need threat intelligence refresh');
+            return [];
+            
+        } catch (error) {
+            console.error('Error getting IPs needing threat check:', error.message);
+            return [];
+        }
+    }
+
+    async getThreatIntelStatus() {
+        try {
+            // Get the real total from header stats (matches the 1,679 display)
+            const totalUniqueQuery = `
+                SELECT COUNT(DISTINCT ip) as count
+                FROM connections 
+                WHERE timestamp > NOW() - INTERVAL '7 days'
+                AND ip != '0.0.0.0'
+                AND ip::text NOT LIKE '192.168.%'
+                AND ip::text NOT LIKE '10.%'
+                AND ip::text NOT LIKE '172.%'
+            `;
+
+            // Count IPs that have been scanned (have threat intel data)
+            const scannedQuery = `
+                SELECT COUNT(DISTINCT t.ip) as count
+                FROM threat_intel t
+                INNER JOIN connections c ON t.ip = c.ip
+                WHERE c.timestamp > NOW() - INTERVAL '7 days'
+                AND t.last_checked IS NOT NULL
+                AND c.ip != '0.0.0.0'
+                AND c.ip::text NOT LIKE '192.168.%'
+                AND c.ip::text NOT LIKE '10.%'
+                AND c.ip::text NOT LIKE '172.%'
+            `;
+
+            // Get last scan time and count of IPs updated since then
+            const lastScanQuery = `
+                SELECT MAX(last_checked) as last_scan
+                FROM threat_intel
+            `;
+
+            const [totalResult, scannedResult, lastScanResult] = await Promise.all([
+                this.pool.query(totalUniqueQuery),
+                this.pool.query(scannedQuery),
+                this.pool.query(lastScanQuery)
+            ]);
+
+            const total = parseInt(totalResult.rows[0].count) || 0;
+            const scanned = parseInt(scannedResult.rows[0].count) || 0;
+            const pending = total - scanned;
+            const lastScan = lastScanResult.rows[0].last_scan;
+
+            // Count IPs updated since last scan
+            let recentlyUpdated = 0;
+            if (lastScan) {
+                const recentQuery = `
+                    SELECT COUNT(DISTINCT t.ip) as count
+                    FROM threat_intel t
+                    INNER JOIN connections c ON t.ip = c.ip
+                    WHERE c.timestamp > NOW() - INTERVAL '7 days'
+                    AND t.last_checked > $1
+                    AND c.ip != '0.0.0.0'
+                    AND c.ip::text NOT LIKE '192.168.%'
+                    AND c.ip::text NOT LIKE '10.%'
+                    AND c.ip::text NOT LIKE '172.%'
+                `;
+                const recentResult = await this.pool.query(recentQuery, [lastScan]);
+                recentlyUpdated = parseInt(recentResult.rows[0].count) || 0;
+            }
+
+            // Quick estimate for priority breakdown (use existing fast function)
+            const pendingIps = await this.getIPsNeedingThreatCheck(50);
+            const samplePending = pendingIps.length;
+            const unknownRatio = samplePending > 0 ? 0.7 : 0;
+            const unknownPending = Math.floor(pending * unknownRatio);
+            const cloudPending = pending - unknownPending;
+
+            const progress = total > 0 ? Math.round((scanned / total) * 100) : 0;
+
+            return {
+                total_ips: total,
+                scanned_ips: scanned,
+                pending_ips: pending,
+                unknown_pending: unknownPending,
+                cloud_pending: cloudPending,
+                recently_updated: recentlyUpdated,
+                scan_progress: progress,
+                last_scan: lastScan
+            };
+
+        } catch (error) {
+            console.error('Error getting threat intel status:', error.message);
+            return {
+                total_ips: 0,
+                scanned_ips: 0,
+                pending_ips: 0,
+                unknown_pending: 0,
+                cloud_pending: 0,
+                recently_updated: 0,
+                scan_progress: 0,
+                last_scan: null
+            };
+        }
+    }
+
+    // Apply data reduction strategies
+    applyDataReduction(connections) {
+        const skipStates = ['TIME_WAIT', 'CLOSE', 'LAST_ACK', 'FIN_WAIT', 'SYN_RECV'];
+        const result = [];
+        const aggregated = new Map();
+
+        for (const conn of connections) {
+            // Skip transient connection states
+            if (conn.state && skipStates.includes(conn.state)) continue;
+
+            // Deduplicate listening ports
+            if (conn.direction === 'inbound' && conn.state === 'LISTEN') {
+                const portKey = `${conn.internal_ip}:${conn.internal_port}`;
+                const now = Date.now();
+                const lastSeen = this.recentListeningPorts.get(portKey);
                 
-                const connections = rows.map(row => ({
-                    ip: row.ip,
-                    connectionCount: row.connection_count,
-                    inboundCount: row.inbound_count,
-                    outboundCount: row.outbound_count,
-                    lastSeen: row.last_seen,
-                    connectionTypes: row.connection_types ? row.connection_types.split(',') : [],
-                    directions: row.directions ? row.directions.split(',') : [],
-                    country: row.country || 'Unknown',
-                    countryCode: row.country_code || '',
-                    region: row.region || 'Unknown',
-                    city: row.city || 'Unknown',
-                    latitude: row.latitude || 0,
-                    longitude: row.longitude || 0,
-                    timezone: row.timezone || 'Unknown',
-                    isp: row.isp || 'Unknown',
-                    org: row.org || 'Unknown',
-                    asn: row.asn || 'Unknown',
-                    hostname: row.hostname || 'No hostname found'
-                }));
-                resolve(connections);
-            });
-        });
+                if (lastSeen && (now - lastSeen) < 3600000) continue; // Skip if seen in last hour
+                this.recentListeningPorts.set(portKey, now);
+            }
+
+            // Aggregate high-volume IPs into 5-minute buckets
+            if (this.highVolumeIPs.has(conn.ip) && conn.direction === 'outbound') {
+                const timestamp = new Date(conn.timestamp);
+                const bucketKey = `${conn.ip}-${Math.floor(timestamp.getTime() / 300000)}`; // 5-minute buckets
+                
+                if (aggregated.has(bucketKey)) {
+                    const existing = aggregated.get(bucketKey);
+                    existing.orig_packets += conn.orig_packets || 0;
+                    existing.orig_bytes += conn.orig_bytes || 0;
+                    existing.reply_packets += conn.reply_packets || 0;
+                    existing.reply_bytes += conn.reply_bytes || 0;
+                    continue;
+                } else {
+                    aggregated.set(bucketKey, { ...conn });
+                }
+            }
+            
+            result.push(conn);
+        }
+
+        // Add aggregated connections
+        for (const aggregatedConn of aggregated.values()) {
+            result.push(aggregatedConn);
+        }
+
+        return result;
+    }
+
+    // Run all retention policies
+    async runRetentionPolicies() {
+        console.log('🔄 Running retention policies...');
+        
+        const results = {
+            aged: await this.cleanupByAge(),
+            sized: await this.cleanupBySize(),
+            geolocations: 0 // Could implement geolocation cleanup later
+        };
+        
+        // Run VACUUM to reclaim space (PostgreSQL specific)
+        try {
+            await this.pool.query('VACUUM ANALYZE');
+            console.log('✅ Database vacuumed and analyzed');
+        } catch (error) {
+            console.error('Error running VACUUM:', error.message);
+        }
+        
+        return results;
     }
 }
 

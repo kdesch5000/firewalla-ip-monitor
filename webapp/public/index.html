@@ -247,6 +247,85 @@
         .connections-table .ip-cell {
             font-family: 'Courier New', monospace;
             color: #00ccff;
+            cursor: pointer;
+            position: relative;
+        }
+        
+        /* Threat Intelligence Tooltip Styles */
+        .threat-tooltip {
+            position: absolute;
+            z-index: 10000;
+            background: linear-gradient(135deg, #2d2d2d, #1a1a1a);
+            border: 2px solid #00ff88;
+            border-radius: 8px;
+            padding: 12px;
+            box-shadow: 0 8px 32px rgba(0, 255, 136, 0.3);
+            color: #ffffff;
+            font-size: 12px;
+            min-width: 300px;
+            max-width: 400px;
+            display: none;
+            pointer-events: none;
+        }
+        
+        .threat-tooltip .tooltip-header {
+            font-size: 14px;
+            font-weight: bold;
+            margin-bottom: 8px;
+            color: #00ff88;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .threat-tooltip .threat-level {
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 10px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+        
+        .threat-level.clean {
+            background-color: #00aa44;
+            color: white;
+        }
+        
+        .threat-level.suspicious {
+            background-color: #ffaa00;
+            color: black;
+        }
+        
+        .threat-level.malicious {
+            background-color: #ff4444;
+            color: white;
+        }
+        
+        .threat-level.unknown {
+            background-color: #666666;
+            color: white;
+        }
+        
+        .threat-detail {
+            display: flex;
+            justify-content: space-between;
+            margin: 4px 0;
+            padding: 2px 0;
+        }
+        
+        .threat-detail .label {
+            color: #aaaaaa;
+            font-weight: normal;
+        }
+        
+        .threat-detail .value {
+            color: #ffffff;
+            font-weight: bold;
+        }
+        
+        .threat-loading {
+            color: #00ff88;
+            font-style: italic;
         }
         
         .connections-table .hostname-cell {
@@ -514,6 +593,115 @@
                 flex-wrap: wrap;
             }
         }
+        
+        /* IP Address Threat Intel Tooltip Styles */
+        .ip-address {
+            cursor: pointer;
+            color: #4da6ff;
+            text-decoration: none;
+            position: relative;
+            transition: color 0.2s;
+        }
+        
+        .ip-address:hover {
+            color: #66b3ff;
+            text-decoration: underline;
+        }
+        
+        .ip-address[data-threat-level="clean"]:hover {
+            color: #4CAF50;
+        }
+        
+        .ip-address[data-threat-level="suspicious"]:hover {
+            color: #FF9800;
+        }
+        
+        .ip-address[data-threat-level="malicious"]:hover {
+            color: #f44336;
+        }
+        
+        .threat-tooltip {
+            position: absolute;
+            background: #2d2d2d;
+            border: 1px solid #555;
+            border-radius: 4px;
+            padding: 0.8rem;
+            color: #ffffff;
+            font-size: 0.85rem;
+            line-height: 1.4;
+            max-width: 300px;
+            z-index: 1000;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            opacity: 0;
+            transform: translateY(10px);
+            transition: opacity 0.2s, transform 0.2s;
+            pointer-events: none;
+        }
+        
+        .threat-tooltip.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        
+        .threat-header {
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+            font-size: 0.9rem;
+        }
+        
+        .threat-detail {
+            margin: 0.3rem 0;
+            display: flex;
+            justify-content: space-between;
+        }
+        
+        .threat-label {
+            font-weight: 500;
+        }
+        
+        .threat-value {
+            color: #cccccc;
+        }
+        
+        .threat-level-clean {
+            color: #4CAF50;
+        }
+        
+        .threat-level-suspicious {
+            color: #FF9800;
+        }
+        
+        .threat-level-malicious {
+            color: #f44336;
+        }
+        
+        .threat-level-unknown {
+            color: #999999;
+        }
+        
+        /* Threat Intel Status Styles */
+        .threat-intel-status {
+            font-size: 0.85rem;
+            line-height: 1.2;
+        }
+        
+        .threat-status-item {
+            display: inline-block;
+            margin-right: 0.5rem;
+            white-space: nowrap;
+        }
+        
+        .threat-status-pending {
+            color: #ff6666;
+        }
+        
+        .threat-status-cloud {
+            color: #ffaa00;
+        }
+        
+        .threat-status-analyzed {
+            color: #00ff88;
+        }
     </style>
 </head>
 <body>
@@ -523,6 +711,16 @@
             <div class="subtitle">Real-time visualization of external IP connections to your network</div>
         </div>
         <div class="header-stats">
+            <div class="stat-group">
+                <div class="stat-item">
+                    <span class="stat-label">🔍 Threat Intel</span>
+                    <span class="stat-value threat-intel-status" id="threatIntelStatus">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Last Scan</span>
+                    <span class="stat-value" id="threatIntelLastScan">--</span>
+                </div>
+            </div>
             <div class="stat-group">
                 <div class="stat-item">
                     <span class="stat-label">Database Size</span>
@@ -608,6 +806,7 @@
         <div class="table-controls">
             <div style="display: flex; gap: 1rem; align-items: center; flex: 1;">
                 <input type="text" id="searchBox" class="search-box" placeholder="🔍 Search by IP, hostname, city, country, or ISP..." style="flex: 1;">
+                <button id="searchBtn" class="btn" style="white-space: nowrap; margin-left: 10px;">🔍 Search</button>
                 <button id="downloadCsvBtn" class="btn" style="white-space: nowrap;">📥 Download CSV</button>
             </div>
             <div class="sort-controls">
@@ -818,22 +1017,52 @@
                         fillOpacity: 0.6
                     }).addTo(map);
                     
-                    // Create popup content
-                    const popupContent = `
+                    // Create popup with loading state, then fetch detailed data
+                    const initialPopupContent = `
                         <div class="connection-popup">
                             <h3>${connection.ip}</h3>
                             <div class="detail"><span class="label">Location:</span> ${connection.city}, ${connection.region}, ${connection.country}</div>
-                            <div class="detail"><span class="label">ISP:</span> ${connection.isp || 'Unknown'}</div>
-                            <div class="detail"><span class="label">Organization:</span> ${connection.org || 'Unknown'}</div>
-                            <div class="detail"><span class="label">ASN:</span> ${connection.asn || 'Unknown'}</div>
-                            <div class="detail"><span class="label">Connections:</span> ${connection.connectionCount} total</div>
-                            <div class="detail"><span class="label">Inbound:</span> ${connection.inboundCount || 0} | <span class="label">Outbound:</span> ${connection.outboundCount || 0}</div>
+                            <div class="detail"><span class="label">ISP:</span> <span id="isp-${connection.ip.replace(/\./g, '-')}">Loading...</span></div>
+                            <div class="detail"><span class="label">Organization:</span> <span id="org-${connection.ip.replace(/\./g, '-')}">Loading...</span></div>
+                            <div class="detail"><span class="label">ASN:</span> <span id="asn-${connection.ip.replace(/\./g, '-')}">Loading...</span></div>
+                            <div class="detail"><span class="label">Connections:</span> ${(connection.connectionCount || 0).toLocaleString()} total</div>
+                            <div class="detail"><span class="label">Inbound:</span> ${(connection.inboundCount || 0).toLocaleString()} | <span class="label">Outbound:</span> ${(connection.outboundCount || 0).toLocaleString()}</div>
                             <div class="detail"><span class="label">Last Seen:</span> ${new Date(connection.lastSeen).toLocaleString()}</div>
-                            <div class="detail"><span class="label">Timezone:</span> ${connection.timezone || 'Unknown'}</div>
+                            <div class="detail"><span class="label">Timezone:</span> <span id="timezone-${connection.ip.replace(/\./g, '-')}">Loading...</span></div>
+                            <div class="detail"><span class="label">Threat Level:</span> <span id="threat-${connection.ip.replace(/\./g, '-')}">Loading...</span></div>
                         </div>
                     `;
                     
-                    marker.bindPopup(popupContent);
+                    marker.bindPopup(initialPopupContent);
+                    
+                    // Load detailed data when popup is opened
+                    marker.on('popupopen', async () => {
+                        const ipSafe = connection.ip.replace(/\./g, '-');
+                        try {
+                            // Fetch location details
+                            const locationResponse = await fetch(`/api/location/${connection.ip}`);
+                            if (locationResponse.ok) {
+                                const locationData = await locationResponse.json();
+                                document.getElementById(`isp-${ipSafe}`).textContent = locationData.isp || 'Unknown';
+                                document.getElementById(`org-${ipSafe}`).textContent = locationData.org || 'Unknown';
+                                document.getElementById(`asn-${ipSafe}`).textContent = locationData.asn || 'Unknown';
+                                document.getElementById(`timezone-${ipSafe}`).textContent = locationData.timezone || 'Unknown';
+                            }
+                            
+                            // Fetch threat intelligence
+                            const threatResponse = await fetch(`/api/threat-intel/${connection.ip}`);
+                            if (threatResponse.ok) {
+                                const threatData = await threatResponse.json();
+                                const threatLevel = threatData.threat_intel?.threat_level || 'unknown';
+                                const threatEmoji = threatLevel === 'clean' ? '🟢' : 
+                                                  threatLevel === 'suspicious' ? '🟡' : 
+                                                  threatLevel === 'malicious' ? '🔴' : '⚪';
+                                document.getElementById(`threat-${ipSafe}`).innerHTML = `${threatEmoji} ${threatLevel.toUpperCase()}`;
+                            }
+                        } catch (error) {
+                            console.error(`Error loading details for ${connection.ip}:`, error);
+                        }
+                    });
                     markers.push(marker);
                     
                     // Draw arched line to home location if available
@@ -1017,7 +1246,9 @@
                     ]);
                 
                 row.innerHTML = `
-                    <td class="ip-cell">${connection.ip}</td>
+                    <td class="ip-cell">
+                        <span class="ip-address" data-ip="${connection.ip}">${connection.ip}</span>
+                    </td>
                     <td class="hostname-cell">${hostname}</td>
                     <td class="location-cell">
                         <img src="https://flagsapi.com/${connection.countryCode}/flat/32.png" 
@@ -1031,16 +1262,136 @@
                         <small>${connection.org || 'Unknown Org'}</small><br>
                         <small style="color: #666;">${connection.asn || 'Unknown ASN'}</small>
                     </td>
-                    <td class="count-cell">${connection.connectionCount}</td>
+                    <td class="count-cell">${(connection.connectionCount || 0).toLocaleString()}</td>
                     <td class="count-cell">
-                        <span style="color: #ff6666;">⬇️ ${connection.inboundCount || 0}</span><br>
-                        <span style="color: #66ff66;">⬆️ ${connection.outboundCount || 0}</span>
+                        <span style="color: #ff6666;">⬇️ ${(connection.inboundCount || 0).toLocaleString()}</span><br>
+                        <span style="color: #66ff66;">⬆️ ${(connection.outboundCount || 0).toLocaleString()}</span>
                     </td>
                     <td class="date-cell">${new Date(connection.lastSeen).toLocaleString()}</td>
                 `;
                 
                 tableBody.appendChild(row);
             }
+            
+            // Initialize threat intel tooltips for IP addresses
+            initializeThreatTooltips();
+        }
+        
+        // Initialize hover tooltips for IP addresses in the connection list
+        function initializeThreatTooltips() {
+            console.log('initializeThreatTooltips called');
+            const ipElements = document.querySelectorAll('.ip-address');
+            console.log(`Found ${ipElements.length} IP elements`);
+            
+            if (ipElements.length === 0) {
+                console.log('No IP elements found - will try again in 1 second');
+                setTimeout(initializeThreatTooltips, 1000);
+                return;
+            }
+            
+            ipElements.forEach((ipElement, index) => {
+                console.log(`Setting up tooltip for IP element ${index}: ${ipElement.dataset.ip}`);
+                
+                let currentTooltip = null;
+                
+                ipElement.addEventListener('mouseenter', async (e) => {
+                    const ip = e.target.dataset.ip;
+                    console.log(`HOVER EVENT: ${ip}`);
+                    
+                    // Remove any existing tooltips immediately
+                    if (currentTooltip) {
+                        currentTooltip.remove();
+                        currentTooltip = null;
+                    }
+                    
+                    // Create tooltip with loading message
+                    currentTooltip = document.createElement('div');
+                    currentTooltip.style.cssText = `
+                        position: fixed;
+                        background: #2d2d2d;
+                        color: white;
+                        padding: 12px;
+                        border: 1px solid #555;
+                        border-radius: 5px;
+                        font-size: 12px;
+                        z-index: 999999;
+                        box-shadow: 0 4px 8px rgba(0,0,0,0.5);
+                        pointer-events: none;
+                        opacity: 1;
+                        display: block;
+                        max-width: 250px;
+                        line-height: 1.4;
+                    `;
+                    currentTooltip.innerHTML = `🔍 <b>${ip}</b><br>Loading threat data...`;
+                    
+                    // Position tooltip
+                    const rect = e.target.getBoundingClientRect();
+                    currentTooltip.style.left = (rect.left + 10) + 'px';
+                    currentTooltip.style.top = (rect.bottom + 10) + 'px';
+                    
+                    document.body.appendChild(currentTooltip);
+                    console.log('Tooltip added to DOM');
+                    
+                    // Load threat intelligence data
+                    try {
+                        const response = await fetch(`/api/threat-intel/${ip}`);
+                        if (response.ok && currentTooltip) {
+                            const data = await response.json();
+                            const threatData = data.threat_intel;
+                            
+                            const threatLevel = threatData?.threat_level || 'unknown';
+                            const vtReputation = threatData?.virustotal_reputation || 0;
+                            const vtTotal = threatData?.virustotal_total || 0;
+                            const abuseConfidence = threatData?.abuseipdb_confidence || 0;
+                            const lastChecked = threatData?.last_checked;
+                            
+                            // Threat level emoji and color
+                            const threatEmoji = threatLevel === 'clean' ? '🟢' : 
+                                              threatLevel === 'suspicious' ? '🟡' : 
+                                              threatLevel === 'malicious' ? '🔴' : '⚪';
+                            
+                            const threatColor = threatLevel === 'clean' ? '#4CAF50' : 
+                                              threatLevel === 'suspicious' ? '#FF9800' : 
+                                              threatLevel === 'malicious' ? '#f44336' : '#999999';
+                            
+                            // Show more informative message for unknown/not processed IPs
+                            const statusMessage = threatLevel === 'unknown' && !threatData?.last_checked ? 
+                                                  'Not yet analyzed' : 
+                                                  threatLevel.toUpperCase();
+                            
+                            // Update IP element color
+                            e.target.style.color = threatColor;
+                            
+                            // Update tooltip content with threat data
+                            if (currentTooltip) {
+                                const vtDisplay = threatData && threatData.last_checked ? `${vtReputation}/${vtTotal} engines` : 'Not analyzed';
+                                const abuseDisplay = threatData && threatData.last_checked ? `${abuseConfidence}% confidence` : 'Not analyzed';
+                                
+                                currentTooltip.innerHTML = `
+                                    ${threatEmoji} <b>${ip}</b><br>
+                                    <span style="color: ${threatColor}">Status: ${statusMessage}</span><br>
+                                    VirusTotal: ${vtDisplay}<br>
+                                    AbuseIPDB: ${abuseDisplay}${lastChecked ? '<br>Last Checked: ' + new Date(lastChecked).toLocaleDateString() : '<br><small style="color: #888;">Will be analyzed in background</small>'}
+                                `;
+                            }
+                        }
+                    } catch (error) {
+                        console.error(`Error loading threat data for ${ip}:`, error);
+                        if (currentTooltip) {
+                            currentTooltip.innerHTML = `❌ <b>${ip}</b><br>Error loading threat data`;
+                        }
+                    }
+                });
+                
+                ipElement.addEventListener('mouseleave', (e) => {
+                    console.log(`MOUSE LEAVE: ${e.target.dataset.ip}`);
+                    if (currentTooltip) {
+                        currentTooltip.remove();
+                        currentTooltip = null;
+                        console.log('Tooltip removed');
+                    }
+                });
+            });
         }
         
         // Database search for connections
@@ -1055,7 +1406,7 @@
                 document.getElementById('loading').style.display = 'block';
                 document.getElementById('status').textContent = searchTerm ? `Searching for "${searchTerm}"...` : 'Loading connections...';
                 
-                let url = '/api/connections/search?limit=2000';
+                let url = '/api/connections/search?limit=1000';
                 
                 if (searchTerm && searchTerm.trim().length > 0) {
                     url += `&q=${encodeURIComponent(searchTerm.trim())}`;
@@ -1083,8 +1434,8 @@
                 await processConnectionData(data, 'current');
                 
                 const resultText = searchTerm ? 
-                    `Found ${data.totalConnections} results for "${searchTerm}"` : 
-                    `Loaded ${data.totalConnections} connections`;
+                    `Found ${(data.totalConnections || 0).toLocaleString()} results for "${searchTerm}"` : 
+                    `Loaded ${(data.totalConnections || 0).toLocaleString()} connections`;
                 document.getElementById('status').textContent = resultText;
                 
             } catch (error) {
@@ -1167,7 +1518,7 @@
             try {
                 document.getElementById('loading').style.display = 'block';
                 
-                // Try fast database endpoint first
+                // Try fast database endpoint first - use larger limit for time filtering
                 let url = '/api/connections/history-fast?limit=2000';
                 
                 if (startDateTime) {
@@ -1210,9 +1561,9 @@
                 homeLocation = data.homeLocation;
                 
                 // Update UI
-                document.getElementById('connectionCount').textContent = data.totalConnections;
+                document.getElementById('connectionCount').textContent = (data.totalConnections || 0).toLocaleString();
                 document.getElementById('lastUpdate').textContent = new Date(data.lastUpdate).toLocaleString();
-                document.getElementById('status').textContent = `Loaded ${data.totalConnections} current connections`;
+                document.getElementById('status').textContent = `Loaded ${(data.totalConnections || 0).toLocaleString()} current connections`;
             } else {
                 // For historical data, aggregate by IP address like current mode
                 const ipMap = new Map();
@@ -1278,9 +1629,9 @@
                 await resolveHistoricalGeolocation();
                 
                 // Update UI
-                document.getElementById('connectionCount').textContent = connectionsData.length;
+                document.getElementById('connectionCount').textContent = (connectionsData.length || 0).toLocaleString();
                 document.getElementById('lastUpdate').textContent = 'Historical Data';
-                document.getElementById('status').textContent = `Loaded ${connectionsData.length} unique IPs from ${data.totalCount} historical connections`;
+                document.getElementById('status').textContent = `Loaded ${(connectionsData.length || 0).toLocaleString()} unique IPs from ${(data.totalCount || 0).toLocaleString()} historical connections`;
             }
             
             // Apply initial filtering and add markers to map
@@ -1393,6 +1744,7 @@
         async function loadConnections() {
             await loadConnectionData();
             await loadHeaderStats();
+            await loadThreatIntelStatus();
         }
         
         // Refresh data
@@ -1430,7 +1782,7 @@
                 // Update database size
                 const dbSizeElement = document.getElementById('headerDbSize');
                 if (stats.database && stats.database.size_mb) {
-                    dbSizeElement.textContent = `${Math.round(stats.database.size_mb)}MB`;
+                    dbSizeElement.textContent = `${Math.round(stats.database.size_mb).toLocaleString()}MB`;
                 } else {
                     dbSizeElement.textContent = 'Unknown';
                 }
@@ -1439,16 +1791,7 @@
                 const oldestElement = document.getElementById('headerOldestRecord');
                 if (stats.database && stats.database.oldest_record) {
                     const oldestDate = new Date(stats.database.oldest_record);
-                    const now = new Date();
-                    const daysDiff = Math.floor((now - oldestDate) / (1000 * 60 * 60 * 24));
-                    
-                    if (daysDiff === 0) {
-                        oldestElement.textContent = 'Today';
-                    } else if (daysDiff === 1) {
-                        oldestElement.textContent = '1 day ago';
-                    } else {
-                        oldestElement.textContent = `${daysDiff} days ago`;
-                    }
+                    oldestElement.textContent = oldestDate.toLocaleString();
                 } else {
                     oldestElement.textContent = 'Unknown';
                 }
@@ -1456,7 +1799,7 @@
                 // Update total connections
                 const totalConnectionsElement = document.getElementById('headerTotalConnections');
                 if (stats.database && stats.database.total_connections) {
-                    const count = stats.database.total_connections;
+                    const count = parseInt(stats.database.total_connections);
                     totalConnectionsElement.textContent = count.toLocaleString();
                 } else {
                     totalConnectionsElement.textContent = 'Unknown';
@@ -1465,7 +1808,8 @@
                 // Update unique IPs
                 const uniqueIPsElement = document.getElementById('headerUniqueIPs');
                 if (stats.database && stats.database.unique_ips) {
-                    uniqueIPsElement.textContent = stats.database.unique_ips.toLocaleString();
+                    const count = parseInt(stats.database.unique_ips);
+                    uniqueIPsElement.textContent = count.toLocaleString();
                 } else {
                     uniqueIPsElement.textContent = 'Unknown';
                 }
@@ -1476,6 +1820,76 @@
                 document.getElementById('headerOldestRecord').textContent = 'Error';
                 document.getElementById('headerTotalConnections').textContent = 'Error';
                 document.getElementById('headerUniqueIPs').textContent = 'Error';
+            }
+        }
+        
+        // Load threat intel status for header
+        async function loadThreatIntelStatus() {
+            try {
+                const response = await fetch('/api/threat-intel/status');
+                const status = await response.json();
+                
+                // Update threat intel status with clear, readable display
+                const statusElement = document.getElementById('threatIntelStatus');
+                if (statusElement) {
+                    if (status.total_ips > 0) {
+                        // Build recently updated display
+                        const recentText = status.recently_updated > 0 ? ` (+${status.recently_updated} new)` : '';
+                        
+                        statusElement.innerHTML = `
+                            <div style="font-size: 0.8rem; line-height: 1.3;">
+                                <div>
+                                    <span style="color: #00ff88;">${status.scanned_ips.toLocaleString()} Scanned</span> | 
+                                    <span style="color: #ff6666;">${status.pending_ips.toLocaleString()} Not Scanned</span>
+                                    <span style="color: #ffaa00; font-size: 0.7rem;">${recentText}</span>
+                                </div>
+                                <div style="font-size: 0.7rem; color: #cccccc;">
+                                    ${status.unknown_pending.toLocaleString()} Unknown • ${status.cloud_pending.toLocaleString()} Cloud • ${status.scan_progress}% Complete of ${status.total_ips.toLocaleString()}
+                                </div>
+                            </div>
+                        `;
+                    } else {
+                        statusElement.innerHTML = '<div style="color: #999;">No data</div>';
+                    }
+                    
+                    // Add detailed tooltip
+                    const recentTooltip = status.recently_updated > 0 ? `\n• ${status.recently_updated.toLocaleString()} IPs Updated Since Last Scan` : '';
+                    statusElement.title = `Threat Intelligence Status:
+• ${status.scanned_ips.toLocaleString()} IPs Scanned (${status.scan_progress}%)
+• ${status.pending_ips.toLocaleString()} IPs Not Scanned:
+  - ${status.unknown_pending.toLocaleString()} Unknown/Suspicious (Priority 1)  
+  - ${status.cloud_pending.toLocaleString()} Cloud Providers (Priority 2)
+• Total External IPs: ${status.total_ips.toLocaleString()}${recentTooltip}`;
+                }
+                
+                // Update last scan time
+                const lastScanElement = document.getElementById('threatIntelLastScan');
+                if (lastScanElement) {
+                    if (status.last_scan) {
+                        const lastScanDate = new Date(status.last_scan);
+                        const now = new Date();
+                        const diffMinutes = Math.floor((now - lastScanDate) / (1000 * 60));
+                        
+                        if (diffMinutes < 1) {
+                            lastScanElement.textContent = 'Just now';
+                        } else if (diffMinutes < 60) {
+                            lastScanElement.textContent = `${diffMinutes}m ago`;
+                        } else if (diffMinutes < 1440) {
+                            const hours = Math.floor(diffMinutes / 60);
+                            lastScanElement.textContent = `${hours}h ago`;
+                        } else {
+                            const days = Math.floor(diffMinutes / 1440);
+                            lastScanElement.textContent = `${days}d ago`;
+                        }
+                    } else {
+                        lastScanElement.textContent = 'Never';
+                    }
+                }
+                
+            } catch (error) {
+                console.error('Error loading threat intel status:', error);
+                document.getElementById('threatIntelStatus').textContent = 'Error';
+                document.getElementById('threatIntelLastScan').textContent = 'Error';
             }
         }
         
@@ -1526,9 +1940,9 @@
                 document.getElementById('endDateTime').style.display = 'inline';
                 document.getElementById('applyTimeFilter').style.display = 'inline';
                 
-                // Set default to last 24 hours
+                // Set default to last 6 hours for better performance
                 const now = new Date();
-                const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+                const yesterday = new Date(now.getTime() - 6 * 60 * 60 * 1000);
                 const endDateValue = now.toISOString().slice(0, 16);
                 const startDateValue = yesterday.toISOString().slice(0, 16);
                 
@@ -1672,22 +2086,24 @@
             document.getElementById('timeHistoryBtn').addEventListener('click', () => setTimeMode('history'));
             document.getElementById('applyTimeFilter').addEventListener('click', applyTimeFilter);
             
-            // Set up search functionality with debouncing
-            let searchTimeout;
-            document.getElementById('searchBox').addEventListener('input', (e) => {
-                const searchTerm = e.target.value;
-                
-                // Clear existing timeout
-                clearTimeout(searchTimeout);
-                
-                // Debounce the search - wait 300ms after user stops typing
-                searchTimeout = setTimeout(() => {
-                    if (timeMode === 'history') {
-                        searchDatabase(searchTerm);
-                    } else {
-                        filterConnections(searchTerm);
-                    }
-                }, 300);
+            // Set up search functionality with button trigger
+            function performSearch() {
+                const searchTerm = document.getElementById('searchBox').value;
+                if (timeMode === 'history') {
+                    searchDatabase(searchTerm);
+                } else {
+                    filterConnections(searchTerm);
+                }
+            }
+            
+            // Search button click
+            document.getElementById('searchBtn').addEventListener('click', performSearch);
+            
+            // Enter key in search box
+            document.getElementById('searchBox').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    performSearch();
+                }
             });
             
             // Set up CSV download button
@@ -1738,6 +2154,9 @@
             
             // Auto-refresh every 10 minutes
             setInterval(loadConnections, 10 * 60 * 1000);
+            
+            // Auto-refresh threat intel status every 30 seconds
+            setInterval(loadThreatIntelStatus, 30 * 1000);
         }
         
         // Start when page loads

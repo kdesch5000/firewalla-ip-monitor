@@ -7,6 +7,7 @@ const { exec } = require('child_process');
 const { promisify } = require('util');
 const dns = require('dns').promises;
 const ConnectionsDatabase = require('./database');
+const ThreatIntelService = require('./threat-intel');
 
 const app = express();
 const PORT = 3001; // Safe port away from UniFi
@@ -35,6 +36,7 @@ const CONFIG = {
 // In-memory cache for processed data
 let connectionsCache = [];
 let lastUpdate = new Date();
+let threatIntelService;
 
 // Hostname resolution cache
 const hostnameCache = new Map();
@@ -575,7 +577,18 @@ app.get('/api/connections', async (req, res) => {
             if (conn.latitude && conn.longitude) {
                 const key = `${conn.latitude},${conn.longitude}`;
                 if (locationMap.has(key)) {
-                    locationMap.get(key).connectionCount++;
+                    const location = locationMap.get(key);
+                    location.connectionCount++;
+                    // Track direction counts
+                    if (conn.direction === 'inbound') {
+                        location.inboundCount = (location.inboundCount || 0) + 1;
+                    } else if (conn.direction === 'outbound') {
+                        location.outboundCount = (location.outboundCount || 0) + 1;
+                    }
+                    // Update last seen if this connection is newer
+                    if (new Date(conn.timestamp) > new Date(location.lastSeen)) {
+                        location.lastSeen = conn.timestamp;
+                    }
                 } else {
                     locationMap.set(key, {
                         ip: conn.ip,
@@ -585,7 +598,13 @@ app.get('/api/connections', async (req, res) => {
                         latitude: parseFloat(conn.latitude),
                         longitude: parseFloat(conn.longitude),
                         connectionCount: 1,
-                        lastSeen: conn.timestamp
+                        inboundCount: conn.direction === 'inbound' ? 1 : 0,
+                        outboundCount: conn.direction === 'outbound' ? 1 : 0,
+                        lastSeen: conn.timestamp,
+                        isp: conn.isp,
+                        org: conn.org,
+                        asn: conn.asn,
+                        countryCode: conn.country_code
                     });
                 }
             }
@@ -602,6 +621,102 @@ app.get('/api/connections', async (req, res) => {
     } catch (error) {
         log(`Error serving connections: ${error.message}`);
         res.status(500).json({ error: 'Failed to load connection data' });
+    }
+});
+
+// API endpoint for threat intelligence status (must come before the :ip route)
+app.get('/api/threat-intel/status', async (req, res) => {
+    try {
+        // Set timeout to ensure fast response
+        const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Query timeout')), 3000)
+        );
+        
+        const statusPromise = db.getThreatIntelStatus();
+        
+        const status = await Promise.race([statusPromise, timeoutPromise]);
+        res.json(status);
+    } catch (error) {
+        console.error('Error getting threat intel status:', error.message);
+        
+        // Try to get basic stats quickly as fallback
+        try {
+            const stats = await db.getStats();
+            const threatCount = await db.pool.query('SELECT COUNT(*) as count FROM threat_intel WHERE last_checked IS NOT NULL');
+            const scanned = parseInt(threatCount.rows[0].count) || 0;
+            const totalIPs = parseInt(stats.database?.unique_ips || stats.unique_ips) || 0;
+            const pending = totalIPs - scanned;
+            const progress = totalIPs > 0 ? Math.round((scanned / totalIPs) * 100) : 0;
+            
+            const fallback = {
+                total_ips: totalIPs,
+                scanned_ips: scanned,
+                pending_ips: pending,
+                unknown_pending: Math.floor(pending * 0.7),
+                cloud_pending: Math.floor(pending * 0.3),
+                recently_updated: 0,
+                scan_progress: progress,
+                last_scan: null
+            };
+            
+            res.json(fallback);
+        } catch (fallbackError) {
+            // Ultimate fallback
+            const fallback = {
+                total_ips: 0,
+                scanned_ips: 0,
+                pending_ips: 0,
+                unknown_pending: 0,
+                cloud_pending: 0,
+                recently_updated: 0,
+                scan_progress: 0,
+                last_scan: null,
+                error: 'Loading...'
+            };
+            
+            res.json(fallback);
+        }
+    }
+});
+
+// API endpoint for threat intelligence data
+app.get('/api/threat-intel/:ip', async (req, res) => {
+    try {
+        const ip = req.params.ip;
+        
+        // First check if we have cached data (less than 24 hours old)
+        let threatData = await db.getThreatIntel(ip);
+        
+        if (!threatData) {
+            // No cached data, return minimal response and queue for background fetch
+            threatData = {
+                ip: ip,
+                threat_level: 'unknown',
+                virustotal_reputation: 0,
+                virustotal_total: 0,
+                abuseipdb_confidence: 0,
+                last_checked: null
+            };
+            
+            // Queue IP for background processing
+            if (threatIntelService) {
+                backgroundThreatIntelRefresh([ip]);
+            }
+        } else {
+            // Parse JSON fields
+            try {
+                threatData.virustotal_categories = JSON.parse(threatData.virustotal_categories || '[]');
+                threatData.abuseipdb_categories = JSON.parse(threatData.abuseipdb_categories || '[]');
+            } catch (e) {
+                threatData.virustotal_categories = [];
+                threatData.abuseipdb_categories = [];
+            }
+        }
+        
+        res.json({ threat_intel: threatData });
+    } catch (error) {
+        console.error(`Error getting threat intel for ${req.params.ip}:`, error.message);
+        res.status(500).json({ error: 'Failed to get threat intelligence' });
     }
 });
 
@@ -898,10 +1013,70 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+// Background threat intelligence refresh function
+async function backgroundThreatIntelRefresh(specificIPs = null) {
+    if (!threatIntelService) {
+        console.log('Threat intelligence service not initialized');
+        return;
+    }
+
+    try {
+        let ipsToCheck = specificIPs;
+        
+        if (!ipsToCheck) {
+            // Get IPs that need refresh (older than 24 hours or never checked)
+            ipsToCheck = await db.getIPsNeedingThreatCheck(3); // Process 3 at a time to match API rate limits
+        }
+        
+        if (ipsToCheck.length === 0) {
+            console.log('No IPs need threat intelligence refresh');
+            return;
+        }
+
+        console.log(`Background threat intel refresh: checking ${ipsToCheck.length} IPs`);
+        
+        for (const ip of ipsToCheck) {
+            try {
+                // Check if we already have fresh data (race condition protection)
+                const existingData = await db.getThreatIntel(ip);
+                if (existingData) {
+                    continue; // Skip if already fresh
+                }
+                
+                // Fetch threat intelligence
+                const threatData = await threatIntelService.getThreatIntelligence(ip);
+                
+                if (threatData) {
+                    // Store in database
+                    await db.upsertThreatIntel(ip, threatData);
+                    console.log(`Updated threat intel for ${ip}: threat_level determined from data`);
+                } else {
+                    // Store empty result to avoid repeated API calls
+                    await db.upsertThreatIntel(ip, {});
+                    console.log(`No threat intel data available for ${ip}`);
+                }
+                
+            } catch (error) {
+                console.error(`Error processing threat intel for ${ip}:`, error.message);
+            }
+        }
+        
+        console.log('Background threat intel refresh completed');
+        
+    } catch (error) {
+        console.error('Error in background threat intel refresh:', error.message);
+    }
+}
+
 // Schedule automatic data collection every 2 minutes for real-time monitoring
 cron.schedule('*/2 * * * *', () => {
     log('Scheduled comprehensive data collection starting...');
     runDataCollection();
+});
+
+// Schedule threat intelligence refresh every 10 minutes
+cron.schedule('*/10 * * * *', () => {
+    backgroundThreatIntelRefresh();
 });
 
 // Skip initial JSON data load - now using database directly
@@ -917,6 +1092,10 @@ async function initializeServer() {
         log(`Warning: Database initialization failed: ${error.message}`);
         log('Historical data will fall back to JSON files');
     }
+    
+    // Initialize threat intelligence service
+    threatIntelService = new ThreatIntelService();
+    log('Threat intelligence service initialized');
     
     // Load geolocation cache
     await loadGeolocationCache();
