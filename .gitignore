@@ -20,4 +20,4 @@ webapp/package-lock.json
 # Temporary files
 *.tmp
 *.temp
-/tmp/
+/tmp/connections.db
