@@ -426,6 +426,40 @@ async function loadConnectionData() {
             }
         }
         
+        // Insert new connection data into database if available
+        if (db && db.isInitialized && allConnectionData.length > 0) {
+            try {
+                log(`Inserting ${allConnectionData.length} connection records into database...`);
+                
+                // Prepare connection data for database insertion
+                const connectionsForDB = allConnectionData.map(conn => ({
+                    ip: conn.ip,
+                    timestamp: conn.timestamp,
+                    direction: conn.direction || 'inbound',
+                    connection_type: conn.type,
+                    internal_ip: conn.internal_ip || null,
+                    internal_port: conn.internal_port || null,
+                    external_port: conn.external_port || null,
+                    state: conn.state || null,
+                    orig_packets: conn.orig_packets || 0,
+                    orig_bytes: conn.orig_bytes || 0,
+                    reply_packets: conn.reply_packets || 0,
+                    reply_bytes: conn.reply_bytes || 0,
+                    details: conn.details || null,
+                    source_file: conn.source_file || 'live_collection'
+                }));
+                
+                // Use aggregated batch insert with data reduction
+                const insertedCount = await db.insertConnectionsAggregated(connectionsForDB);
+                log(`Successfully inserted ${insertedCount} new connection records into database`);
+                
+            } catch (error) {
+                log(`Warning: Failed to insert connections into database: ${error.message}`);
+            }
+        } else if (!db || !db.isInitialized) {
+            log('Database not initialized, skipping insertion');
+        }
+        
         // Group by unique external IP
         const ipGroups = {};
         allConnectionData.forEach(conn => {
@@ -445,6 +479,15 @@ async function loadConnectionData() {
             const location = await getIPLocation(ip);
             
             if (location && location.latitude && location.longitude) {
+                // Insert/update geolocation data in database
+                if (db && db.isInitialized) {
+                    try {
+                        await db.upsertGeolocation(ip, location);
+                    } catch (error) {
+                        log(`Warning: Failed to insert geolocation for ${ip}: ${error.message}`);
+                    }
+                }
+                
                 const ipConnections = ipGroups[ip];
                 const connectionCount = ipConnections.length;
                 const lastSeen = ipConnections
@@ -519,14 +562,41 @@ async function runDataCollection() {
 // API Routes
 app.get('/api/connections', async (req, res) => {
     try {
-        if (connectionsCache.length === 0) {
-            await loadConnectionData();
+        // Get recent connections from database instead of loading all JSON files
+        const recentConnections = await db.getHistoricalConnections({
+            limit: 5000, // Limit to recent 5000 connections for map display
+            orderBy: 'timestamp DESC'
+        });
+        
+        // Process connections for map display (group by location)
+        const locationMap = new Map();
+        
+        for (const conn of recentConnections) {
+            if (conn.latitude && conn.longitude) {
+                const key = `${conn.latitude},${conn.longitude}`;
+                if (locationMap.has(key)) {
+                    locationMap.get(key).connectionCount++;
+                } else {
+                    locationMap.set(key, {
+                        ip: conn.ip,
+                        country: conn.country,
+                        region: conn.region,
+                        city: conn.city,
+                        latitude: parseFloat(conn.latitude),
+                        longitude: parseFloat(conn.longitude),
+                        connectionCount: 1,
+                        lastSeen: conn.timestamp
+                    });
+                }
+            }
         }
         
+        const processedConnections = Array.from(locationMap.values());
+        
         res.json({
-            connections: connectionsCache,
-            lastUpdate: lastUpdate,
-            totalConnections: connectionsCache.length,
+            connections: processedConnections,
+            lastUpdate: new Date(),
+            totalConnections: processedConnections.length,
             homeLocation: CONFIG.homeLocation
         });
     } catch (error) {
@@ -834,10 +904,8 @@ cron.schedule('*/2 * * * *', () => {
     runDataCollection();
 });
 
-// Initial data load
-loadConnectionData().then(() => {
-    log('Initial data load completed');
-});
+// Skip initial JSON data load - now using database directly
+log('Using database for connection data (skipping JSON file loading)');
 
 // Initialize server
 async function initializeServer() {
@@ -858,10 +926,10 @@ async function initializeServer() {
         saveGeolocationCache();
     });
     
-    // Schedule database retention policies (daily at 2 AM)
-    cron.schedule('0 2 * * *', async () => {
+    // Schedule database retention policies (every 30 minutes)
+    cron.schedule('*/30 * * * *', async () => {
         try {
-            log('Running daily database retention policies...');
+            log('Running database retention policies...');
             const results = await db.runRetentionPolicies();
             log(`Retention completed: ${results.aged} aged, ${results.sized} oversized, ${results.geolocations} orphaned geo records removed`);
         } catch (error) {
@@ -875,7 +943,7 @@ async function initializeServer() {
         log(`Access via: http://localhost:${PORT} or http://[your-ip]:${PORT}`);
         log('Scheduled comprehensive data collection every 2 minutes');
         log('Scheduled geolocation cache saves every 5 minutes');
-        log(`Scheduled database retention policies daily at 2 AM (${db.retentionConfig.maxAgeDays}d/${db.retentionConfig.maxSizeMB}MB limits)`);
+        log(`Scheduled database retention policies every 30 minutes (${db.retentionConfig.maxAgeDays}d/${db.retentionConfig.maxSizeMB}MB limits)`);
     });
 }
 

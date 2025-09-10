@@ -18,6 +18,13 @@ class ConnectionsDatabase {
             enableSizeLimit: options.enableSizeLimit !== false, // Enable by default
             enableTimeLimit: options.enableTimeLimit !== false  // Enable by default
         };
+
+        // Tracking for data reduction strategies
+        this.recentListeningPorts = new Map(); // Track recent listening ports
+        this.highVolumeIPs = new Set(['0.0.0.0', '8.8.8.8', '3.12.68.8', '15.197.187.26', '3.33.190.236']); // Known high-volume IPs
+        this.listeningPortCleanupInterval = setInterval(() => {
+            this.recentListeningPorts.clear();
+        }, 3600000); // Clear every hour
         
         // Email notification configuration
         this.emailConfig = {
@@ -202,6 +209,91 @@ class ConnectionsDatabase {
                 });
             });
         });
+    }
+
+    // Aggregated batch insert with data reduction strategies
+    async insertConnectionsAggregated(connections) {
+        const filteredConnections = this.applyDataReduction(connections);
+        return this.insertConnectionsBatch(filteredConnections);
+    }
+
+    // Apply data reduction strategies (memory-efficient)
+    applyDataReduction(connections) {
+        const skipStates = ['TIME_WAIT', 'CLOSE', 'LAST_ACK', 'FIN_WAIT', 'SYN_RECV'];
+        const result = [];
+        const aggregated = new Map();
+        const currentTime = new Date();
+        let skipped = 0;
+
+        // Process connections in smaller batches to reduce memory usage
+        const batchSize = 10000;
+        for (let i = 0; i < connections.length; i += batchSize) {
+            const batch = connections.slice(i, i + batchSize);
+            
+            for (const conn of batch) {
+                // Strategy 1: Skip transient states (immediate memory saving)
+                if (skipStates.includes(conn.state)) {
+                    skipped++;
+                    continue;
+                }
+
+                // Strategy 2: Deduplicate listening ports (keep one per hour)
+                if (conn.connection_type === 'listening_port' || conn.type === 'listening_port') {
+                    const hourKey = `${conn.ip}-${currentTime.getHours()}`;
+                    if (this.recentListeningPorts.has(hourKey)) {
+                        skipped++;
+                        continue; // Skip this listening port, already logged this hour
+                    }
+                    this.recentListeningPorts.set(hourKey, true);
+                }
+
+                // Strategy 3: Aggregate high-volume IPs by 5-minute buckets
+                if (this.highVolumeIPs.has(conn.ip)) {
+                    const bucket = this.get5MinuteBucket(conn.timestamp);
+                    const key = `${conn.ip}-${bucket}-${conn.direction}-${conn.connection_type || conn.type}`;
+                    
+                    if (aggregated.has(key)) {
+                        // Update existing aggregated entry
+                        const existing = aggregated.get(key);
+                        existing.orig_packets = (existing.orig_packets || 0) + (conn.orig_packets || 0);
+                        existing.orig_bytes = (existing.orig_bytes || 0) + (conn.orig_bytes || 0);
+                        existing.reply_packets = (existing.reply_packets || 0) + (conn.reply_packets || 0);
+                        existing.reply_bytes = (existing.reply_bytes || 0) + (conn.reply_bytes || 0);
+                        existing.connection_count = (existing.connection_count || 1) + 1;
+                        existing.details = `Aggregated ${existing.connection_count} connections`;
+                    } else {
+                        // Create new aggregated entry
+                        aggregated.set(key, {
+                            ...conn,
+                            timestamp: bucket, // Use bucket timestamp
+                            details: `Aggregated connection (count: 1)`,
+                            connection_count: 1
+                        });
+                    }
+                } else {
+                    // Keep individual records for low-volume IPs
+                    result.push(conn);
+                }
+            }
+        }
+
+        // Add aggregated entries to result
+        result.push(...Array.from(aggregated.values()));
+        
+        console.log(`Data reduction: ${connections.length} -> ${result.length} connections (${Math.round((1 - result.length/connections.length) * 100)}% reduction, ${skipped} skipped)`);
+        
+        // Clear aggregated map to free memory
+        aggregated.clear();
+        
+        return result;
+    }
+
+    // Helper function to create 5-minute time buckets
+    get5MinuteBucket(timestamp) {
+        const date = new Date(timestamp);
+        const minutes = Math.floor(date.getMinutes() / 5) * 5;
+        date.setMinutes(minutes, 0, 0); // Set to start of 5-minute bucket
+        return date.toISOString();
     }
 
     // Get historical connections with filtering
