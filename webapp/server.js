@@ -641,8 +641,12 @@ app.get('/api/threat-intel/status', async (req, res) => {
         
         // Try to get basic stats quickly as fallback
         try {
-            const stats = await db.getStats();
-            const threatCount = await db.pool.query('SELECT COUNT(*) as count FROM threat_intel WHERE last_checked IS NOT NULL');
+            const [stats, threatCount, lastScan] = await Promise.all([
+                db.getStats(),
+                db.pool.query('SELECT COUNT(*) as count FROM threat_intel WHERE last_checked IS NOT NULL'),
+                db.pool.query('SELECT MAX(last_checked) as last_scan FROM threat_intel')
+            ]);
+            
             const scanned = parseInt(threatCount.rows[0].count) || 0;
             const totalIPs = parseInt(stats.database?.unique_ips || stats.unique_ips) || 0;
             const pending = totalIPs - scanned;
@@ -656,7 +660,7 @@ app.get('/api/threat-intel/status', async (req, res) => {
                 cloud_pending: Math.floor(pending * 0.3),
                 recently_updated: 0,
                 scan_progress: progress,
-                last_scan: null
+                last_scan: lastScan.rows[0].last_scan
             };
             
             res.json(fallback);
