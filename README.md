@@ -5,7 +5,7 @@ A comprehensive monitoring system that visualizes all external IP addresses conn
 ## Features
 
 - **Global Map Visualization**: Interactive Leaflet.js map showing connection locations worldwide
-- **SQLite Database Backend**: High-performance database for historical connection storage
+- **PostgreSQL Database Backend**: High-performance database for historical connection storage
 - **Comprehensive Data Collection**: Monitors multiple sources:
   - FireMain logs (connection history)
   - Current active connections (netstat)
@@ -30,15 +30,15 @@ A comprehensive monitoring system that visualizes all external IP addresses conn
 
 - **Collection Script**: `collect_wan_connections.sh` - Bash script that collects data from Firewalla
 - **Web Server**: `webapp/server.js` - Node.js/Express server providing APIs
-- **Database Layer**: `webapp/database.js` - SQLite database management with retention policies
-- **Migration Tool**: `migrate_to_db.js` - Tool for migrating JSON data to SQLite database
+- **Database Layer**: `webapp/database.js` - PostgreSQL database management with retention policies
+- **Schema Setup**: `postgres_schema.sql` - PostgreSQL database schema and indexes
 - **Web Interface**: `webapp/public/index.html` - Frontend with map and list views
 - **Startup Script**: `start-monitor.sh` - Convenient startup wrapper
 - **Systemd Service**: `firewalla-monitor.service` - System service for auto-start
 
 ### Database Architecture
 
-The system uses SQLite for efficient historical data storage:
+The system uses PostgreSQL for efficient historical data storage:
 
 ```
 ┌─────────────────────────────────────┐         ┌─────────────────────────────────────┐
@@ -90,7 +90,7 @@ cd firewalla-ip-monitor
 ```
 
 The installer will:
-- ✅ Install all system dependencies (Node.js, SQLite, SSH tools)  
+- ✅ Install all system dependencies (Node.js, PostgreSQL, SSH tools)  
 - ✅ Walk you through configuration (Firewalla IP, database settings)
 - ✅ Set up SSH key authentication (optional)
 - ✅ Configure systemd service for auto-start (optional)
@@ -104,14 +104,14 @@ If you prefer manual setup:
 - Ubuntu/Debian Linux with apt package manager
 - Firewalla Purple with SSH access configured
 - Node.js (v14+) and npm
-- SQLite3
+- PostgreSQL
 
 #### Setup Steps
 
 1. **Install dependencies**:
    ```bash
    sudo apt update
-   sudo apt install nodejs npm sqlite3 ssh curl jq
+   sudo apt install nodejs npm postgresql postgresql-contrib ssh curl jq
    ```
 
 2. **Clone the repository**:
@@ -212,7 +212,7 @@ The monitor will:
 - Start initial data collection from your Firewalla
 - Launch the web server on port 3001  
 - Begin automatic data collection every 2 minutes
-- Store data in SQLite database with automatic retention policies
+- Store data in PostgreSQL database with automatic retention policies
 
 ### Manual Data Collection
 
@@ -253,7 +253,7 @@ The monitor will:
 
 ## Database Features
 
-### SQLite Integration
+### PostgreSQL Integration
 - **High Performance**: 6x faster than file-based queries (sub-3-second vs 18+ seconds)
 - **Structured Storage**: Normalized tables for connections and geolocation data
 - **Full-text Search**: Indexed fields for fast IP, timestamp, and direction filtering
@@ -275,7 +275,7 @@ The monitor will:
 - **Retention Results**: Recent cleanup removed 5,000+ records, saving 34.7MB
 
 ### Migration Support
-- **Automated Migration**: `migrate_to_db.js` converts existing JSON files to SQLite
+- **Schema Setup**: `postgres_schema.sql` provides optimized table structure
 - **Batch Processing**: Handles large datasets efficiently (2,700+ files)
 - **Data Preservation**: Maintains all historical connection and geolocation data
 - **Backward Compatibility**: Existing APIs continue to work during transition
@@ -303,7 +303,7 @@ The system uses port 3001 to avoid conflicts with UniFi (ports 8080, 8443).
    ```bash
    # Install dependencies manually
    sudo apt update
-   sudo apt install nodejs npm sqlite3 ssh curl jq
+   sudo apt install nodejs npm postgresql postgresql-contrib ssh curl jq
    ```
 
 2. **SSH connection test fails**:
@@ -337,7 +337,7 @@ The system uses port 3001 to avoid conflicts with UniFi (ports 8080, 8443).
    ls -la data/connections.db
    
    # Test database manually
-   sqlite3 data/connections.db "SELECT COUNT(*) FROM connections;"
+   psql -d firewalla_monitor -c "SELECT COUNT(*) FROM connections;"
    ```
 
 3. **No connection data appearing**:
@@ -369,11 +369,11 @@ firewalla-ip-monitor/
 ├── migrate_to_db.js            # Database migration tool
 ├── firewalla-monitor.service   # Systemd service file template
 ├── data/                       # Database and cache files (created at runtime)
-│   ├── connections.db          # SQLite database
+│   ├── (PostgreSQL database)   # Remote PostgreSQL server
 │   └── geolocation_cache.json  # IP geolocation cache
 └── webapp/
     ├── server.js               # Node.js server
-    ├── database.js             # SQLite database layer
+    ├── database.js             # PostgreSQL database layer
     ├── package.json           # Node.js dependencies
     └── public/
         └── index.html         # Web interface
