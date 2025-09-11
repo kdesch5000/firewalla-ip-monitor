@@ -448,20 +448,39 @@
             border-radius: 1px;
         }
         
-        .legend-line.high {
-            background-color: #ff4444;
-            height: 4px;
+        /* Map Connection Type Legend */
+        .map-legend {
+            background-color: #2d2d2d;
+            padding: 1rem;
+            border-top: 1px solid #444444;
+            border-bottom: 1px solid #444444;
         }
         
-        .legend-line.medium {
-            background-color: #ffaa00;
-            height: 3px;
+        .map-legend h4 {
+            color: #cccccc;
+            margin: 0 0 0.8rem 0;
+            font-size: 1rem;
         }
         
-        .legend-line.low {
-            background-color: #00ff88;
-            height: 2px;
+        .map-legend .legend-items {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1.5rem;
+            align-items: center;
         }
+        
+        .map-legend .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.85rem;
+        }
+        
+        .map-legend .legend-item span {
+            color: #cccccc;
+        }
+        
+        /* Old legend line styles removed - now using inline styles for security-focused legend */
         
         .legend-text {
             color: #ffffff;
@@ -778,25 +797,33 @@
         </div>
     </div>
     
-    <!-- Color Legend -->
-    <div id="colorLegend" class="color-legend" style="display: none;">
-        <div class="legend-title">📊 Connection Volume:</div>
+    <!-- Security-Focused Connection Type Legend -->
+    <div id="colorLegend" class="color-legend">
+        <div class="legend-title">🛡️ Connection Security Types:</div>
         <div class="legend-items">
             <div class="legend-item">
-                <div class="legend-line high"></div>
-                <span class="legend-text">High <span class="legend-count">(>50)</span></span>
+                <div class="legend-line" style="background: #ff0066; width: 30px; height: 3px;"></div>
+                <span class="legend-text">Network Reconnaissance</span>
             </div>
             <div class="legend-item">
-                <div class="legend-line medium"></div>
-                <span class="legend-text">Medium <span class="legend-count">(21-50)</span></span>
+                <div class="legend-line" style="background: #ff4444; width: 30px; height: 3px;"></div>
+                <span class="legend-text">Direct Firewalla Attacks</span>
             </div>
             <div class="legend-item">
-                <div class="legend-line low"></div>
-                <span class="legend-text">Low <span class="legend-count">(1-20)</span></span>
+                <div class="legend-line" style="background: #0088ff; width: 30px; height: 3px;"></div>
+                <span class="legend-text">Device Network Activity</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-line" style="background: #ffaa00; width: 30px; height: 3px;"></div>
+                <span class="legend-text">Other Connection Types</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-line" style="background: #00ff88; width: 30px; height: 3px;"></div>
+                <span class="legend-text">Normal Traffic</span>
             </div>
         </div>
         <div style="margin-left: auto; color: #999999; font-size: 0.8rem;">
-            Line color and thickness indicate total connection count from each IP
+            Line colors indicate connection security threat level • Line thickness shows volume
         </div>
     </div>
     
@@ -1089,9 +1116,33 @@
                         // Calculate arc points
                         const arcPoints = calculateArcPoints(connectionPoint, homePoint, 50);
                         
-                        // Create polyline with gradient effect
-                        const lineColor = connection.connectionCount > 50 ? '#ff4444' : 
-                                         connection.connectionCount > 20 ? '#ffaa00' : '#00ff88';
+                        // Determine line color based on connection types (security-focused coloring)
+                        let lineColor = '#00ff88'; // Default: Normal traffic (green)
+                        let lineDescription = 'Normal Traffic';
+                        
+                        if (connection.connectionTypes && connection.connectionTypes.length > 0) {
+                            const types = connection.connectionTypes;
+                            
+                            // Priority: Most dangerous to least dangerous
+                            if (types.includes('scan_probe')) {
+                                lineColor = '#ff0066';  // Hot pink: Network reconnaissance/attacks
+                                lineDescription = 'Network Reconnaissance';
+                            } else if (types.includes('firemain_log')) {
+                                lineColor = '#ff4444';  // Red: Direct attacks on Firewalla
+                                lineDescription = 'Direct Firewalla Attack';
+                            } else if (types.includes('conntrack')) {
+                                lineColor = '#0088ff';  // Blue: Routed device activity
+                                lineDescription = 'Device Network Activity';
+                            } else {
+                                lineColor = '#ffaa00';  // Orange: Other/unknown
+                                lineDescription = 'Other Connection Type';
+                            }
+                        }
+                        
+                        // Add tooltip with connection type info
+                        const connectionTypeInfo = connection.connectionTypes && connection.connectionTypes.length > 0 
+                            ? connection.connectionTypes.join(', ') 
+                            : 'unknown';
                         
                         const connectionLine = L.polyline(arcPoints, {
                             color: lineColor,

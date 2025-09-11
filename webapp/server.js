@@ -30,7 +30,10 @@ const CONFIG = {
         city: 'Chicago',
         region: 'Illinois',
         country: 'United States'
-    }
+    },
+    // Data reduction settings
+    maxConnectionsPerIP: parseInt(process.env.MAX_CONNECTIONS_PER_IP) || 50, // Configurable limit per IP per collection cycle
+    maxUniqueIPsPerCycle: parseInt(process.env.MAX_UNIQUE_IPS_PER_CYCLE) || 100 // Limit total unique IPs processed per cycle
 };
 
 // In-memory cache for processed data
@@ -341,6 +344,19 @@ async function extractIPsFromData(data, dataType) {
                         });
                     }
                     break;
+                
+                case 'conntrack_live':
+                    // Process conntrack data format: already has ip, direction, protocol, state 
+                    if (item.ip && await isExternalIP(item.ip)) {
+                        ips.push({
+                            ip: item.ip,
+                            timestamp: item.timestamp,
+                            type: `conntrack_${item.protocol}`,
+                            details: `${item.direction} ${item.state} ${item.protocol.toUpperCase()} connection to ${item.ip}:${item.port} from ${item.local_ip}`,
+                            direction: item.direction
+                        });
+                    }
+                    break;
             }
         } catch (error) {
             // Skip malformed entries
@@ -369,6 +385,7 @@ async function loadConnectionData() {
         const fileTypes = {
             'connections_': [],
             'current_connections_': [],
+            'conntrack_live_': [],  // NEW: Live routed connections via conntrack
             'scans_probes_': [],
             'realtime_connections_': [],
             'vpn_connections_': [],
@@ -384,8 +401,9 @@ async function loadConnectionData() {
             });
         });
         
-        // Collect all IPs from all sources
+        // Collect all IPs from all sources with per-IP connection limits
         const allConnectionData = [];
+        const ipConnectionCounts = new Map(); // Track connections per IP
         
         // Process all files to get complete historical data
         for (const [prefix, files] of Object.entries(fileTypes)) {
@@ -403,7 +421,19 @@ async function loadConnectionData() {
                         const data = await fs.readFile(filePath, 'utf8');
                         const parsedData = JSON.parse(data);
                         const extractedIPs = await extractIPsFromData(parsedData, dataType);
-                        allConnectionData.push(...extractedIPs);
+                        
+                        // Apply per-IP connection limit
+                        const filteredIPs = [];
+                        for (const conn of extractedIPs) {
+                            const currentCount = ipConnectionCounts.get(conn.ip) || 0;
+                            if (currentCount < CONFIG.maxConnectionsPerIP) {
+                                filteredIPs.push(conn);
+                                ipConnectionCounts.set(conn.ip, currentCount + 1);
+                            }
+                        }
+                        
+                        allConnectionData.push(...filteredIPs);
+                        log(`Applied connection limit: ${filteredIPs.length}/${extractedIPs.length} connections kept for ${dataType}`);
                         
                         // Limit processing to avoid memory issues (keep last 24 hours worth)
                         const fileTimestamp = file.match(/(\d{8}_\d{6})/);
@@ -424,8 +454,16 @@ async function loadConnectionData() {
                     }
                 }
                 
-                log(`Total extracted ${allConnectionData.length} connection records from ${dataType}`);
+                log(`Total extracted ${allConnectionData.length} connection records from ${dataType} (after per-IP limits)`);
             }
+        }
+        
+        // Log connection limiting statistics
+        const limitedIPs = Array.from(ipConnectionCounts.entries())
+            .filter(([ip, count]) => count >= CONFIG.maxConnectionsPerIP);
+        if (limitedIPs.length > 0) {
+            log(`Applied connection limits to ${limitedIPs.length} IPs (${CONFIG.maxConnectionsPerIP} connections each)`);
+            log(`Top limited IPs: ${limitedIPs.slice(0, 5).map(([ip, count]) => `${ip}:${count}`).join(', ')}`);
         }
         
         // Insert new connection data into database if available
@@ -472,12 +510,18 @@ async function loadConnectionData() {
         });
         
         const uniqueIPs = Object.keys(ipGroups);
-        log(`Found ${uniqueIPs.length} unique external IPs across all sources`);
+        const limitedUniqueIPs = uniqueIPs.slice(0, CONFIG.maxUniqueIPsPerCycle);
+        
+        if (uniqueIPs.length > CONFIG.maxUniqueIPsPerCycle) {
+            log(`Limited unique IP processing: ${CONFIG.maxUniqueIPsPerCycle}/${uniqueIPs.length} IPs (${uniqueIPs.length - CONFIG.maxUniqueIPsPerCycle} skipped)`);
+        } else {
+            log(`Found ${uniqueIPs.length} unique external IPs across all sources`);
+        }
         
         // Get geolocation for each IP (with rate limiting)
         const processedConnections = [];
-        for (let i = 0; i < Math.min(uniqueIPs.length, 50); i++) { // Increased limit
-            const ip = uniqueIPs[i];
+        for (let i = 0; i < limitedUniqueIPs.length; i++) { // Use limited IP list
+            const ip = limitedUniqueIPs[i];
             const location = await getIPLocation(ip);
             
             if (location && location.latitude && location.longitude) {
@@ -585,11 +629,35 @@ app.get('/api/connections', async (req, res) => {
                     } else if (conn.direction === 'outbound') {
                         location.outboundCount = (location.outboundCount || 0) + 1;
                     }
+                    // Track connection types for map line coloring
+                    if (!location.connectionTypes) location.connectionTypes = new Set();
+                    const connType = conn.connection_type;
+                    if (connType === 'conntrack_tcp' || connType === 'conntrack_udp') {
+                        location.connectionTypes.add('conntrack');
+                    } else if (connType === 'firemain_log') {
+                        location.connectionTypes.add('firemain_log');
+                    } else if (connType && (connType.includes('scan') || connType.includes('probe'))) {
+                        location.connectionTypes.add('scan_probe');
+                    } else {
+                        location.connectionTypes.add('other');
+                    }
                     // Update last seen if this connection is newer
                     if (new Date(conn.timestamp) > new Date(location.lastSeen)) {
                         location.lastSeen = conn.timestamp;
                     }
                 } else {
+                    const connectionTypes = new Set();
+                    const connType = conn.connection_type;
+                    if (connType === 'conntrack_tcp' || connType === 'conntrack_udp') {
+                        connectionTypes.add('conntrack');
+                    } else if (connType === 'firemain_log') {
+                        connectionTypes.add('firemain_log');
+                    } else if (connType && (connType.includes('scan') || connType.includes('probe'))) {
+                        connectionTypes.add('scan_probe');
+                    } else {
+                        connectionTypes.add('other');
+                    }
+                    
                     locationMap.set(key, {
                         ip: conn.ip,
                         country: conn.country,
@@ -604,13 +672,17 @@ app.get('/api/connections', async (req, res) => {
                         isp: conn.isp,
                         org: conn.org,
                         asn: conn.asn,
-                        countryCode: conn.country_code
+                        countryCode: conn.country_code,
+                        connectionTypes: connectionTypes
                     });
                 }
             }
         }
         
-        const processedConnections = Array.from(locationMap.values());
+        const processedConnections = Array.from(locationMap.values()).map(conn => ({
+            ...conn,
+            connectionTypes: conn.connectionTypes ? Array.from(conn.connectionTypes) : []
+        }));
         
         res.json({
             connections: processedConnections,
@@ -1009,6 +1081,48 @@ app.put('/api/retention/config', (req, res) => {
         res.json({ success: true, config: db.retentionConfig });
     } catch (error) {
         res.status(500).json({ error: 'Failed to update retention config', details: error.message });
+    }
+});
+
+// API endpoint to get collection limit configuration
+app.get('/api/collection/config', (req, res) => {
+    res.json({
+        config: {
+            maxConnectionsPerIP: CONFIG.maxConnectionsPerIP,
+            maxUniqueIPsPerCycle: CONFIG.maxUniqueIPsPerCycle
+        },
+        description: {
+            maxConnectionsPerIP: 'Maximum connections per IP per collection cycle',
+            maxUniqueIPsPerCycle: 'Maximum unique IPs processed per collection cycle'
+        }
+    });
+});
+
+// API endpoint to update collection limit configuration
+app.put('/api/collection/config', (req, res) => {
+    try {
+        const { maxConnectionsPerIP, maxUniqueIPsPerCycle } = req.body;
+        
+        if (maxConnectionsPerIP && maxConnectionsPerIP > 0) {
+            CONFIG.maxConnectionsPerIP = parseInt(maxConnectionsPerIP);
+            log(`Updated maxConnectionsPerIP to ${CONFIG.maxConnectionsPerIP}`);
+        }
+        
+        if (maxUniqueIPsPerCycle && maxUniqueIPsPerCycle > 0) {
+            CONFIG.maxUniqueIPsPerCycle = parseInt(maxUniqueIPsPerCycle);
+            log(`Updated maxUniqueIPsPerCycle to ${CONFIG.maxUniqueIPsPerCycle}`);
+        }
+        
+        log(`Collection config updated: maxConnectionsPerIP=${CONFIG.maxConnectionsPerIP}, maxUniqueIPsPerCycle=${CONFIG.maxUniqueIPsPerCycle}`);
+        res.json({ 
+            success: true, 
+            config: {
+                maxConnectionsPerIP: CONFIG.maxConnectionsPerIP,
+                maxUniqueIPsPerCycle: CONFIG.maxUniqueIPsPerCycle
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to update collection config', details: error.message });
     }
 });
 

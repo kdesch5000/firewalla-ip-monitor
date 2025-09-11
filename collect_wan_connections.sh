@@ -85,6 +85,86 @@ collect_firemain_ips() {
     log "Collected data saved to: ${output_file}"
 }
 
+# Collect current conntrack connections - captures ALL routed traffic (LIVE ONLY - NO HISTORY)
+collect_conntrack_connections() {
+    local output_file="${DATA_DIR}/conntrack_live_$(date +%Y%m%d_%H%M%S).json"
+    
+    log "Collecting live routed connections via conntrack (no history storage)..."
+    
+    # Use conntrack to capture ALL current routed connections including NAT
+    ssh "${FIREWALLA_USER}@${FIREWALLA_HOST}" "sudo conntrack -L 2>/dev/null | grep -E 'ESTABLISHED|SYN_SENT|SYN_RECV' | grep -v '127.0.0.1'" | \
+    awk -v timestamp="$(date -Iseconds)" '
+    BEGIN { 
+        print "["; 
+        first=1 
+    }
+    # Parse conntrack format: tcp 6 432000 ESTABLISHED src=192.168.86.162 dst=47.34.44.148 sport=51126 dport=15069 packets=4794 bytes=276119 src=47.34.44.148 dst=104.0.40.169 sport=15069 dport=51126 packets=3364 bytes=539526 [ASSURED] mark=2155937792 use=1
+    /^(tcp|udp).*src=.*dst=.*sport=.*dport=/ {
+        protocol = $1
+        state = ""
+        src_ip = ""
+        dst_ip = ""
+        src_port = ""
+        dst_port = ""
+        
+        # Extract state (varies by position)
+        if (protocol == "tcp") {
+            state = $4
+        } else {
+            state = "UDP"
+        }
+        
+        # Extract original connection details
+        for (i = 1; i <= NF; i++) {
+            if ($i ~ /^src=/) {
+                gsub(/^src=/, "", $i)
+                if (src_ip == "") src_ip = $i
+            }
+            if ($i ~ /^dst=/) {
+                gsub(/^dst=/, "", $i)
+                if (dst_ip == "") dst_ip = $i
+            }
+            if ($i ~ /^sport=/) {
+                gsub(/^sport=/, "", $i)
+                if (src_port == "") src_port = $i
+            }
+            if ($i ~ /^dport=/) {
+                gsub(/^dport=/, "", $i)
+                if (dst_port == "") dst_port = $i
+            }
+        }
+        
+        # Determine external IP (check if source is internal, destination is external)
+        ext_ip = ""
+        local_ip = ""
+        direction = ""
+        
+        if (src_ip ~ /^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)/ && dst_ip !~ /^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.)/) {
+            # Outbound: internal source -> external destination
+            ext_ip = dst_ip
+            local_ip = src_ip
+            direction = "outbound"
+        } else if (dst_ip ~ /^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)/ && src_ip !~ /^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|127\.)/) {
+            # Inbound: external source -> internal destination  
+            ext_ip = src_ip
+            local_ip = dst_ip
+            direction = "inbound"
+        }
+        
+        # Only output if we found a valid external IP
+        if (ext_ip != "" && ext_ip != "0.0.0.0") {
+            if (first != 1) print ","
+            first = 0
+            printf "    {\"timestamp\": \"%s\", \"type\": \"conntrack\", \"ip\": \"%s\", \"local_ip\": \"%s\", \"port\": \"%s\", \"protocol\": \"%s\", \"state\": \"%s\", \"direction\": \"%s\", \"details\": \"conntrack live connection\"}", 
+                   timestamp, ext_ip, local_ip, (direction == "outbound" ? dst_port : src_port), protocol, state, direction
+        }
+    }
+    END { print "\n]" }
+    ' > "${output_file}"
+    
+    log "Live conntrack connections saved to: ${output_file} (will be deleted after processing)"
+}
+
 # Collect current netstat connections - ALL states
 collect_current_connections() {
     local output_file="${DATA_DIR}/current_connections_$(date +%Y%m%d_%H%M%S).json"
@@ -518,11 +598,13 @@ main() {
     
     collect_firemain_ips
     collect_current_connections
+    collect_conntrack_connections  # NEW: Live routed connections
     collect_scan_detection
     collect_realtime_connections
     
-    # Cleanup old files (keep last 24 hours)
+    # Cleanup old files (keep last 24 hours) and temporary conntrack files
     find "${DATA_DIR}" -name "*.json" -mtime +1 -delete 2>/dev/null || true
+    find "${DATA_DIR}" -name "conntrack_live_*.json" -mmin +5 -delete 2>/dev/null || true  # Clean conntrack files after 5 minutes
     
     log "Comprehensive collection completed successfully"
 }
@@ -533,6 +615,7 @@ collect_all() {
     
     collect_firemain_ips
     collect_current_connections
+    collect_conntrack_connections  # NEW: Live routed connections
     collect_scan_detection
     collect_realtime_connections
     collect_vpn_connections

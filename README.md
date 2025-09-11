@@ -20,7 +20,7 @@ A comprehensive monitoring system that visualizes all external IP addresses conn
 - **Advanced Filtering**: Filter connections by direction (inbound/outbound), date ranges, IP addresses
 - **Connection List View**: Detailed table showing IP addresses, hostnames, geolocation data with CSV export
 - **Arc Visualization**: Curved lines on map showing connection paths from sources to home location
-- **Color-coded Connections**: Visual legend for different connection types and directions
+- **Security-Focused Connection Classification**: Automatically categorizes connections by threat level with color-coded map visualization
 - **Data Retention Policies**: Configurable size and time-based data cleanup
 - **Server-side DNS Resolution**: Resolves hostnames without CORS limitations
 - **Automatic Updates**: Collects fresh data every 2 minutes with database storage
@@ -382,13 +382,32 @@ firewalla-ip-monitor/
         └── index.html         # Web interface
 ```
 
+## Documentation
+
+### Connection Types
+For detailed information about how the system categorizes and visualizes different types of network connections, see:
+
+📚 **[CONNECTION_TYPES.md](CONNECTION_TYPES.md)** - Comprehensive guide to connection classification, threat levels, and security analysis workflow.
+
+This document explains:
+- **Security-focused connection categories** (reconnaissance, attacks, device activity, etc.)
+- **Visual color coding** for immediate threat assessment
+- **Response procedures** for different threat levels
+- **Technical details** about detection methods and data sources
+
+### Additional Documentation
+- `SQL_QUERY_EXAMPLES.txt` - Database query examples and analytics
+- `THREAT_INTELLIGENCE_SETUP.md` - Threat intelligence configuration
+- `DATABASE_OPTIMIZATION_NOTES.md` - Performance tuning and optimization
+
 ## Contributing
 
 This project monitors network security and external connections. Contributions should focus on:
-- Enhanced connection detection
-- Improved geolocation accuracy
-- Better visualization features
+- Enhanced connection detection and classification
+- Improved threat intelligence integration
+- Better security visualization features
 - Performance optimizations
+- Security analysis capabilities
 
 ## License
 
