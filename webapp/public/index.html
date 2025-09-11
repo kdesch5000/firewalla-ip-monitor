@@ -1053,11 +1053,27 @@
                             const threatResponse = await fetch(`/api/threat-intel/${connection.ip}`);
                             if (threatResponse.ok) {
                                 const threatData = await threatResponse.json();
-                                const threatLevel = threatData.threat_intel?.threat_level || 'unknown';
+                                const threatInfo = threatData.threat_intel;
+                                const threatLevel = threatInfo?.threat_level || 'unknown';
                                 const threatEmoji = threatLevel === 'clean' ? '🟢' : 
                                                   threatLevel === 'suspicious' ? '🟡' : 
                                                   threatLevel === 'malicious' ? '🔴' : '⚪';
-                                document.getElementById(`threat-${ipSafe}`).innerHTML = `${threatEmoji} ${threatLevel.toUpperCase()}`;
+                                
+                                // Build detailed threat info
+                                let threatDetails = `${threatEmoji} ${threatLevel.toUpperCase()}`;
+                                if (threatInfo?.last_checked) {
+                                    const sources = [];
+                                    if (threatInfo.abuseipdb_confidence > 0) sources.push(`Abuse: ${threatInfo.abuseipdb_confidence}%`);
+                                    if (threatInfo.greynoise_noise) sources.push(`GN: ${threatInfo.greynoise_classification}`);
+                                    if (threatInfo.otx_threat_types?.length > 0) sources.push(`OTX: ${threatInfo.otx_threat_types.slice(0, 2).join(', ')}`);
+                                    if (threatInfo.otx_reputation < 0) sources.push(`OTX Score: ${threatInfo.otx_reputation}`);
+                                    
+                                    if (sources.length > 0) {
+                                        threatDetails += `<br><small style="color: #ccc;">${sources.join(' | ')}</small>`;
+                                    }
+                                }
+                                
+                                document.getElementById(`threat-${ipSafe}`).innerHTML = threatDetails;
                             }
                         } catch (error) {
                             console.error(`Error loading details for ${connection.ip}:`, error);
@@ -1343,6 +1359,11 @@
                             const vtReputation = threatData?.virustotal_reputation || 0;
                             const vtTotal = threatData?.virustotal_total || 0;
                             const abuseConfidence = threatData?.abuseipdb_confidence || 0;
+                            const greyNoiseNoise = threatData?.greynoise_noise || false;
+                            const greyNoiseClassification = threatData?.greynoise_classification || 'unknown';
+                            const otxReputation = threatData?.otx_reputation || 0;
+                            const otxThreatTypes = threatData?.otx_threat_types || [];
+                            const otxPulses = threatData?.otx_pulses || 0;
                             const lastChecked = threatData?.last_checked;
                             
                             // Threat level emoji and color
@@ -1364,14 +1385,21 @@
                             
                             // Update tooltip content with threat data
                             if (currentTooltip) {
-                                const vtDisplay = threatData && threatData.last_checked ? `${vtReputation}/${vtTotal} engines` : 'Not analyzed';
+                                const vtDisplay = threatData && threatData.last_checked ? `${vtReputation}/${vtTotal} engines` : 'Disabled';
                                 const abuseDisplay = threatData && threatData.last_checked ? `${abuseConfidence}% confidence` : 'Not analyzed';
+                                const greyNoiseDisplay = threatData && threatData.last_checked ? 
+                                    (greyNoiseNoise ? `🔍 ${greyNoiseClassification}` : '✅ Clean') : 'Not analyzed';
+                                const otxDisplay = threatData && threatData.last_checked ? 
+                                    (otxThreatTypes.length > 0 ? `⚠️ ${otxThreatTypes.slice(0, 2).join(', ')}` : 
+                                     otxReputation < 0 ? `📊 Score: ${otxReputation}` : '✅ Clean') : 'Not analyzed';
                                 
                                 currentTooltip.innerHTML = `
                                     ${threatEmoji} <b>${ip}</b><br>
                                     <span style="color: ${threatColor}">Status: ${statusMessage}</span><br>
                                     VirusTotal: ${vtDisplay}<br>
-                                    AbuseIPDB: ${abuseDisplay}${lastChecked ? '<br>Last Checked: ' + new Date(lastChecked).toLocaleDateString() : '<br><small style="color: #888;">Will be analyzed in background</small>'}
+                                    AbuseIPDB: ${abuseDisplay}<br>
+                                    GreyNoise: ${greyNoiseDisplay}<br>
+                                    AlienVault OTX: ${otxDisplay}${otxPulses > 0 ? ` (${otxPulses} pulses)` : ''}${lastChecked ? '<br>Last Checked: ' + new Date(lastChecked).toLocaleDateString() : '<br><small style="color: #888;">Will be analyzed in background</small>'}
                                 `;
                             }
                         }
