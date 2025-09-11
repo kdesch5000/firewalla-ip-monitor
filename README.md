@@ -1,5 +1,8 @@
 # Firewalla IP Monitor
 
+<img width="1157" height="914" alt="image" src="https://github.com/user-attachments/assets/1a7fb1dd-d97e-436b-9d93-a1db445496f7" />
+
+
 A comprehensive monitoring system that visualizes all external IP addresses connecting to or probing your Firewalla Purple's WAN interface on an interactive global map.
 
 ## Features
